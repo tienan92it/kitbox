@@ -22,9 +22,14 @@ services:
       # shows matches the port you actually published.
       PUBLISHED_PORT: ${PUBLISHED_PORT:-4990}
     ports:
-      # Local mode only. With TS_AUTHKEY set the daemon binds loopback and
-      # tailscale reaches it from inside, so nothing needs publishing —
-      # comment this out on a public-IP host.
+      # Local mode only. With TS_AUTHKEY set the daemon binds loopback inside
+      # the container, so this forwards to a closed port — but it still opens
+      # the port on a public host for nothing, and blanking TS_AUTHKEY later
+      # would turn it into a shell on the internet behind a single token.
+      #
+      # To close it, write `ports: []` or comment out BOTH lines. Commenting
+      # out only the entry below leaves the key null, and compose refuses to
+      # start: "services.kitbox.ports must be a list".
       - "${PUBLISHED_PORT:-4990}:3418"
     # The healthcheck lives in the image (see Dockerfile), so `docker run` and
     # compose report the same thing: whether the daemon is serving, not merely
