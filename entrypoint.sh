@@ -1,0 +1,185 @@
+#!/usr/bin/env bash
+# Bring the box up. Two modes, chosen by whether a tailnet key is present.
+#
+#   TS_AUTHKEY set   — join the tailnet, put `tailscale serve` in front, and
+#                      bind kitterm to loopback with the tailnet name trusted.
+#                      Reach it at https://<TS_HOSTNAME>.<tailnet>.ts.net/
+#   TS_AUTHKEY unset — bind every interface in the container so a published
+#                      port works. Reach it at http://localhost:<published>/
+#
+# Every step announces itself. `docker logs` is the only window into a box that
+# never came up, so silence there is the worst possible failure mode.
+set -euo pipefail
+
+# `docker run agentbox <cmd>` runs that command instead of starting the box, so
+# the image can be inspected without a daemon holding the terminal open.
+if [ "$#" -gt 0 ]; then exec "$@"; fi
+
+TS_HOSTNAME="${TS_HOSTNAME:-agentbox}"
+PORT="${KITTERM_PORT:-3418}"
+WORKSPACE="${WORKSPACE_DIR:-/workspace}"
+SOCK=/run/tailscale/tailscaled.sock
+
+say() { echo "[box] $*"; }
+die() { echo "[box] ERROR: $*" >&2; exit 1; }
+
+as_user() {
+  su vscode -c "cd $WORKSPACE 2>/dev/null || cd /home/vscode; \
+                PATH=$PATH SHELL=/bin/bash $1"
+}
+
+# --- state directories --------------------------------------------------------
+# A named volume created by an older image is root-owned, and the daemon then
+# cannot write its token. Repair rather than fail: this runs as root.
+for d in /home/vscode/.kitterm /home/vscode/.claude /home/vscode/.codex; do
+  mkdir -p "$d"
+  [ "$(stat -c %U "$d")" = vscode ] || { say "fixing ownership of $d"; chown -R vscode:vscode "$d"; }
+done
+
+# --- workspace and git --------------------------------------------------------
+mkdir -p "$WORKSPACE"
+chown vscode:vscode "$WORKSPACE" 2>/dev/null || true
+
+if [ -n "${WORKSPACE_REPO:-}" ] && [ -z "$(ls -A "$WORKSPACE" 2>/dev/null)" ]; then
+  say "cloning $WORKSPACE_REPO into $WORKSPACE"
+  as_user "git clone '$WORKSPACE_REPO' '$WORKSPACE'" \
+    || die "clone failed. For a private repo, mount an SSH key at
+       /home/vscode/.ssh or set GH_TOKEN and use an https:// URL."
+fi
+
+if [ -n "${GIT_USER_NAME:-}" ]; then
+  as_user "git config --global user.name '$GIT_USER_NAME'"
+fi
+if [ -n "${GIT_USER_EMAIL:-}" ]; then
+  as_user "git config --global user.email '$GIT_USER_EMAIL'"
+fi
+# Agents commit inside a container whose uid differs from the host's, which git
+# reads as someone else's repository and refuses to touch.
+as_user "git config --global --add safe.directory '$WORKSPACE'" 2>/dev/null || true
+if [ -n "${GH_TOKEN:-}" ]; then
+  as_user "gh auth setup-git" >/dev/null 2>&1 || true
+fi
+
+# --- remote access ------------------------------------------------------------
+if [ -n "${TS_AUTHKEY:-}" ]; then
+  say "starting tailscaled (userspace networking)"
+  mkdir -p /var/lib/tailscale /run/tailscale
+  tailscaled --tun=userspace-networking \
+             --state=/var/lib/tailscale/tailscaled.state \
+             --socket="$SOCK" >/var/log/tailscaled.log 2>&1 &
+  for _ in $(seq 1 30); do [ -S "$SOCK" ] && break; sleep 1; done
+  [ -S "$SOCK" ] || die "tailscaled never created its socket. Log:
+$(tail -20 /var/log/tailscaled.log 2>/dev/null)"
+
+  say "joining the tailnet as '$TS_HOSTNAME'"
+  # --accept-dns=false is load-bearing. MagicDNS rewrites resolv.conf to
+  # 100.100.100.100, which nothing in the container can reach under userspace
+  # networking, and then every lookup times out — including the agent's calls
+  # to its own API, which is a baffling way to discover a DNS problem.
+  #
+  # Bounded, because `tailscale up` has no timeout of its own and blocks
+  # forever when the tailnet requires an admin to approve new machines.
+  if ! timeout 90 tailscale --socket="$SOCK" up \
+            --authkey="$TS_AUTHKEY" \
+            --hostname="$TS_HOSTNAME" \
+            --accept-dns=false; then
+    say "--- tailscale status ---"; tailscale --socket="$SOCK" status 2>&1 | head -10 || true
+    say "--- tailscaled log ---";   tail -15 /var/log/tailscaled.log 2>/dev/null || true
+    die "could not join the tailnet.
+       If it stalled rather than failed, this machine is waiting for approval:
+         https://login.tailscale.com/admin/machines
+       Otherwise check the key is unused and unexpired:
+         https://login.tailscale.com/admin/settings/keys"
+  fi
+
+  # Parse the name properly: every peer carries a DNSName too, so grepping the
+  # first match in the status JSON can return somebody else's machine.
+  say "reading this node's DNS name"
+  FQDN=$(tailscale --socket="$SOCK" status --json \
+         | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+             try{ process.stdout.write((JSON.parse(s).Self?.DNSName||"").replace(/\.$/,"")) }catch(e){}
+           })')
+  [ -n "$FQDN" ] || die "joined the tailnet but this node has no DNS name.
+       Enable MagicDNS: https://login.tailscale.com/admin/dns"
+  say "this box is $FQDN"
+
+  # HTTPS needs a certificate, which the tailnet only issues when HTTPS
+  # Certificates is enabled. Without it the TLS handshake fails and each
+  # attempt burns a Let's Encrypt authorization — five rate-limit the name for
+  # an hour — so HTTP is an explicit choice, never an automatic retry.
+  if [ -n "${TS_SERVE_HTTP:-}" ]; then
+    say "serving plain HTTP over the tailnet (TS_SERVE_HTTP set, no certificate)"
+    SCHEME=http
+    tailscale --socket="$SOCK" serve --bg --http=80 "$PORT" || die "tailscale serve failed"
+  else
+    say "serving HTTPS over the tailnet"
+    SCHEME=https
+    tailscale --socket="$SOCK" serve --bg "$PORT" \
+      || die "tailscale serve failed. Enable HTTPS Certificates, or set
+       TS_SERVE_HTTP=1 to serve without one:
+         https://login.tailscale.com/admin/dns"
+  fi
+
+  # Requests arriving under the tailnet name are treated as remote even though
+  # tailscale reaches the daemon over loopback, so they must present a token.
+  # The proxy is a boundary, not a bypass.
+  say "starting kitterm, trusting $FQDN"
+  as_user "kitterm start --port $PORT --agent-control --trusted-host $FQDN" \
+    || die "kitterm failed to start"
+  URL_BASE="$SCHEME://$FQDN"
+else
+  say "no TS_AUTHKEY — local mode, binding all interfaces in this container"
+  as_user "kitterm start --port $PORT --lan --agent-control" \
+    || die "kitterm failed to start"
+  URL_BASE="http://localhost:${PUBLISHED_PORT:-$PORT}"
+fi
+
+# A named token survives restarts and can be revoked without bouncing the
+# daemon, unlike the ephemeral one. kitterm stores only its hash and shows the
+# value once, so keep our own copy beside it — both live on the same volume, so
+# a bookmarked link keeps working across restarts.
+TOKEN_FILE=/home/vscode/.kitterm/agentbox-token
+mint_token() {
+  as_user "kitterm token revoke phone" >/dev/null 2>&1 || true
+  local fresh
+  fresh=$(as_user "kitterm token create phone" 2>/dev/null | tail -1)
+  case "$fresh" in
+    ktk_*) printf '%s' "$fresh" > "$TOKEN_FILE"
+           chown vscode:vscode "$TOKEN_FILE"; chmod 600 "$TOKEN_FILE"
+           printf '%s' "$fresh" ;;
+    *) return 1 ;;
+  esac
+}
+
+TOKEN="$(cat "$TOKEN_FILE" 2>/dev/null || true)"
+if [ -n "$TOKEN" ]; then
+  # A stored token is worthless if the daemon's own store was wiped without
+  # this file. Prove it still authenticates before printing it in a URL.
+  if ! curl -fsS -m 5 -o /dev/null "http://127.0.0.1:$PORT/api/health?token=$TOKEN" 2>/dev/null; then
+    say "the stored token no longer authenticates; minting a new one"
+    TOKEN="$(mint_token || true)"
+  else
+    say "reusing the token from a previous run"
+  fi
+else
+  TOKEN="$(mint_token || true)"
+fi
+[ -n "${TOKEN:-}" ] || die "daemon started but produced no access token"
+
+echo
+echo "================================================================"
+echo "  Open this on your phone and your laptop:"
+echo "    $URL_BASE/?token=$TOKEN"
+echo
+INSTALLED=""
+for a in claude codex grok opencode; do
+  command -v "$a" >/dev/null 2>&1 && INSTALLED="$INSTALLED $a"
+done
+echo "  Agents:${INSTALLED:- none}"
+echo "  Diagnose problems with:  docker exec <name> doctor"
+echo "================================================================"
+echo
+
+say "box is up; leave this container running"
+# The daemon and its shells are detached; this just keeps the container alive.
+tail -f /dev/null

@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# Why can't I connect?
+#
+#   docker exec <box> doctor
+#
+# Checks, in the order a request travels: the daemon, then DNS, then the
+# outside world, then the tailnet, then TLS. Every failure this template was
+# built around shows up in exactly one of these lines.
+set -uo pipefail
+
+PORT="${KITTERM_PORT:-3418}"
+SOCK=/run/tailscale/tailscaled.sock
+FAIL=0
+
+ok()   { printf "  \033[32mok\033[0m    %s\n" "$*"; }
+bad()  { printf "  \033[31mFAIL\033[0m  %s\n" "$*"; FAIL=1; }
+note() { printf "        %s\n" "$*"; }
+ts()   { tailscale --socket="$SOCK" "$@" 2>/dev/null; }
+
+echo "kitterm"
+if curl -fsS -m 5 -o /dev/null "http://127.0.0.1:$PORT/api/health" 2>/dev/null; then
+  ok "daemon answering on 127.0.0.1:$PORT"
+else
+  bad "daemon not answering on 127.0.0.1:$PORT"
+  note "check: su vscode -c 'kitterm status'  and  ~/.kitterm/server.log"
+fi
+
+SESSIONS=$(curl -fsS -m 5 "http://127.0.0.1:$PORT/api/sessions" 2>/dev/null \
+           | grep -o '"id"' | wc -l | tr -d ' ')
+note "${SESSIONS:-0} session(s) open"
+
+if su vscode -c 'grep -q kitterm_precmd ~/.bashrc' 2>/dev/null; then
+  ok "shell integration installed (commands and exit codes are indexed)"
+else
+  bad "no shell integration in ~/.bashrc"
+  note "without it /api/sessions/<id>/commands stays empty forever"
+fi
+
+echo
+echo "network"
+if getent hosts api.anthropic.com >/dev/null 2>&1; then
+  ok "DNS resolves"
+else
+  bad "DNS is broken"
+  note "resolv.conf: $(grep ^nameserver /etc/resolv.conf | tr '\n' ' ')"
+  note "100.100.100.100 means MagicDNS was accepted; it is unreachable under"
+  note "userspace networking. Restart with --accept-dns=false."
+fi
+
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -m 12 https://api.anthropic.com/v1/messages 2>/dev/null)
+if [ "$CODE" = "405" ] || [ "$CODE" = "401" ] || [ "$CODE" = "400" ]; then
+  ok "api.anthropic.com reachable (HTTP $CODE)"
+elif [ "$CODE" = "000" ] || [ -z "$CODE" ]; then
+  bad "api.anthropic.com unreachable — agents will time out"
+else
+  ok "api.anthropic.com reachable (HTTP $CODE)"
+fi
+
+echo
+echo "tailscale"
+if [ ! -S "$SOCK" ]; then
+  note "not running — this box is in local mode (published port only)"
+else
+  STATE=$(ts status --json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+      try{const j=JSON.parse(s);process.stdout.write((j.BackendState||"")+" "+(j.Self?.DNSName||"").replace(/\.$/,""))}catch(e){}})' 2>/dev/null)
+  BACKEND=${STATE%% *}; FQDN=${STATE#* }
+  if [ "$BACKEND" = "Running" ]; then
+    ok "joined as ${FQDN:-<no name>}"
+  else
+    bad "backend state: ${BACKEND:-unknown}"
+    note "if it says NeedsMachineAuth, approve it: https://login.tailscale.com/admin/machines"
+  fi
+
+  SERVE=$(ts serve status)
+  if [ -n "$SERVE" ]; then
+    ok "serve configured"
+    echo "$SERVE" | sed 's/^/        /'
+  else
+    bad "nothing is being served — the URL will refuse connections"
+  fi
+
+  # The one failure with no visible symptom: serve is configured, the port
+  # answers, and the TLS handshake dies because no certificate can be issued.
+  if echo "$SERVE" | grep -q '^https://'; then
+    CERT=$(grep -iE "acme|cert\(" /var/log/tailscaled.log 2>/dev/null | tail -3)
+    if echo "$CERT" | grep -q "rateLimited"; then
+      bad "Let's Encrypt has rate-limited this name"
+      note "$(echo "$CERT" | grep rateLimited | tail -1 | cut -c1-160)"
+      note "enable HTTPS Certificates, or set TS_SERVE_HTTP=1 and restart"
+    elif echo "$CERT" | grep -qi "error\|failed"; then
+      bad "certificate trouble"
+      note "$(echo "$CERT" | tail -1 | cut -c1-160)"
+      note "enable HTTPS Certificates: https://login.tailscale.com/admin/dns"
+    else
+      ok "no certificate errors logged"
+    fi
+  fi
+fi
+
+echo
+echo "agents"
+for a in claude codex grok opencode; do
+  if command -v "$a" >/dev/null 2>&1; then
+    ok "$a $("$a" --version 2>/dev/null | head -1)"
+  fi
+done
+
+echo
+if [ "$FAIL" -eq 0 ]; then
+  echo "All checks passed."
+else
+  echo "Some checks failed — see the notes above."
+fi
+exit "$FAIL"

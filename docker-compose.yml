@@ -1,0 +1,41 @@
+# A box that outlives your laptop.
+#
+#   cp .env.example .env && $EDITOR .env
+#   docker compose up -d && docker compose logs
+#
+# The named volumes are not incidental. Without them a restart registers a new
+# tailnet node (so the hostname drifts agentbox → agentbox-2 → -3 and your
+# bookmark breaks), mints a new token, and logs the agent out.
+services:
+  agentbox:
+    image: ${AGENTBOX_IMAGE:-ghcr.io/tienan92it/agentbox:latest}
+    build:
+      context: .
+      args:
+        AGENTS: ${AGENTS:-claude}
+        KITTERM_VERSION: ${KITTERM_VERSION:-v0.14.0}
+    container_name: ${TS_HOSTNAME:-agentbox}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Only used by the message the box prints in local mode, so the URL it
+      # shows matches the port you actually published.
+      PUBLISHED_PORT: ${PUBLISHED_PORT:-4990}
+    ports:
+      # Local mode only. With TS_AUTHKEY set the daemon binds loopback and
+      # tailscale reaches it from inside, so nothing needs publishing —
+      # comment this out on a public-IP host.
+      - "${PUBLISHED_PORT:-4990}:3418"
+    volumes:
+      - tailscale:/var/lib/tailscale   # node identity: keeps the hostname stable
+      - kitterm:/home/vscode/.kitterm  # tokens: keeps bookmarked links working
+      - claude:/home/vscode/.claude    # agent auth: survives restarts
+      - workspace:/workspace
+      # Your code instead of a volume:
+      # - /path/to/your/repo:/workspace
+
+volumes:
+  tailscale:
+  kitterm:
+  claude:
+  workspace:
