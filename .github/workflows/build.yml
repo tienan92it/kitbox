@@ -55,10 +55,16 @@ jobs:
           cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
 
+      # The bare hash, not the full `sha256:…` reference: upload-artifact
+      # refuses a colon in a filename, and the merge job below prepends the
+      # prefix again when it rebuilds the reference.
+      # env, not inline ${{ }}, keeps the value out of shell parsing.
       - name: Export the digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           mkdir -p /tmp/digests
-          touch "/tmp/digests/${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${DIGEST#sha256:}"
 
       - uses: actions/upload-artifact@v4
         with:
