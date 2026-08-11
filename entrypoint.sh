@@ -11,11 +11,11 @@
 # never came up, so silence there is the worst possible failure mode.
 set -euo pipefail
 
-# `docker run agentbox <cmd>` runs that command instead of starting the box, so
+# `docker run kitbox <cmd>` runs that command instead of starting the box, so
 # the image can be inspected without a daemon holding the terminal open.
 if [ "$#" -gt 0 ]; then exec "$@"; fi
 
-TS_HOSTNAME="${TS_HOSTNAME:-agentbox}"
+TS_HOSTNAME="${TS_HOSTNAME:-kitbox}"
 PORT="${KITTERM_PORT:-3418}"
 WORKSPACE="${WORKSPACE_DIR:-/workspace}"
 SOCK=/run/tailscale/tailscaled.sock
@@ -138,7 +138,7 @@ fi
 # daemon, unlike the ephemeral one. kitterm stores only its hash and shows the
 # value once, so keep our own copy beside it — both live on the same volume, so
 # a bookmarked link keeps working across restarts.
-TOKEN_FILE=/home/vscode/.kitterm/agentbox-token
+TOKEN_FILE=/home/vscode/.kitterm/kitbox-token
 mint_token() {
   as_user "kitterm token revoke phone" >/dev/null 2>&1 || true
   local fresh

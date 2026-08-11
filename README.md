@@ -1,4 +1,4 @@
-# agentbox
+# kitbox
 
 A container that runs coding agents and serves their terminals to your phone.
 
@@ -13,7 +13,7 @@ the tools worth having when your only screen is a phone.
 ## Quick start
 
 ```sh
-git clone https://github.com/tienan92it/agentbox && cd agentbox
+git clone https://github.com/tienan92it/kitbox && cd kitbox
 cp .env.example .env
 ```
 
@@ -30,7 +30,7 @@ The logs end with the URL to open:
 ```
 ================================================================
   Open this on your phone and your laptop:
-    https://agentbox.tail1234.ts.net/?token=ktk_…
+    https://kitbox.tail1234.ts.net/?token=ktk_…
 ================================================================
 ```
 
@@ -50,7 +50,7 @@ It is only a Docker host, so any of them work the same way. On a fresh VM:
 
 ```sh
 curl -fsSL https://get.docker.com | sh
-git clone https://github.com/tienan92it/agentbox && cd agentbox
+git clone https://github.com/tienan92it/kitbox && cd kitbox
 cp .env.example .env && $EDITOR .env
 docker compose up -d
 ```
@@ -58,13 +58,13 @@ docker compose up -d
 Or skip the build and pull the published image:
 
 ```sh
-docker run -d --name agentbox --env-file .env \
-  -v agentbox-ts:/var/lib/tailscale \
-  -v agentbox-kitterm:/home/vscode/.kitterm \
-  -v agentbox-claude:/home/vscode/.claude \
-  -v agentbox-codex:/home/vscode/.codex \
-  -v agentbox-work:/workspace \
-  ghcr.io/tienan92it/agentbox:latest
+docker run -d --name kitbox --env-file .env \
+  -v kitbox-ts:/var/lib/tailscale \
+  -v kitbox-kitterm:/home/vscode/.kitterm \
+  -v kitbox-claude:/home/vscode/.claude \
+  -v kitbox-codex:/home/vscode/.codex \
+  -v kitbox-work:/workspace \
+  ghcr.io/tienan92it/kitbox:latest
 ```
 
 **On a public-IP host, use the Tailscale mode.** With `TS_AUTHKEY` set the
@@ -115,7 +115,7 @@ write elsewhere under `$HOME` and are not persisted — give them API keys in
 Five named volumes, and none is decoration:
 
 - `/var/lib/tailscale` — the node's identity. Without it every restart joins as
-  a *new* machine, so `agentbox` becomes `agentbox-2`, then `-3`, and your
+  a *new* machine, so `kitbox` becomes `kitbox-2`, then `-3`, and your
   bookmark breaks each time.
 - `/home/vscode/.kitterm` — the access token. Without it every restart mints a
   new one and the link you saved stops working.
@@ -127,7 +127,7 @@ Five named volumes, and none is decoration:
 ## When something is wrong
 
 ```sh
-docker exec agentbox doctor
+docker exec kitbox doctor
 ```
 
 It checks, in the order a request actually travels: the daemon, the shell
@@ -163,6 +163,6 @@ shipped, drop it into `dist/` and it wins over the download:
 
 ```sh
 cd ../kitterm && ./scripts/build-release-linux.sh v0.15.1
-cp dist/kitterm-v0.15.1-linux-arm64.tar.gz ../agentbox/dist/
-cd ../agentbox && docker compose build
+cp dist/kitterm-v0.15.1-linux-arm64.tar.gz ../kitbox/dist/
+cd ../kitbox && docker compose build
 ```

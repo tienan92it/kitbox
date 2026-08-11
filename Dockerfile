@@ -1,12 +1,12 @@
 # A box that runs coding agents and serves their terminals to your phone.
 #
-#   docker build -t agentbox .
+#   docker build -t kitbox .
 #
 # Everything is inside: kitterm, the agents you asked for, Tailscale, git, and
 # the tools worth having when your only screen is a phone.
 #
-# The base is Microsoft's devcontainers image — the same one agentbox-style
-# sandboxes use — so it already carries the `vscode` user, git, and sudo.
+# The base is Microsoft's devcontainers image — the one agent sandboxes reach
+# for — so it already carries the `vscode` user, git, and sudo.
 FROM mcr.microsoft.com/devcontainers/base:ubuntu-24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -105,14 +105,14 @@ RUN set -eu; \
 # Comma-separated, claude always included. Each installer is its own script so
 # adding one is a file, not a Dockerfile edit.
 ARG AGENTS=claude
-COPY agents/ /opt/agentbox/agents/
-RUN chmod +x /opt/agentbox/agents/*.sh \
- && /opt/agentbox/agents/install.sh "$AGENTS"
+COPY agents/ /opt/kitbox/agents/
+RUN chmod +x /opt/kitbox/agents/*.sh \
+ && /opt/kitbox/agents/install.sh "$AGENTS"
 
 # --- the box ------------------------------------------------------------------
-COPY entrypoint.sh /usr/local/bin/agentbox-entrypoint
+COPY entrypoint.sh /usr/local/bin/kitbox-entrypoint
 COPY bin/doctor /usr/local/bin/doctor
-RUN chmod 755 /usr/local/bin/agentbox-entrypoint /usr/local/bin/doctor
+RUN chmod 755 /usr/local/bin/kitbox-entrypoint /usr/local/bin/doctor
 
 # Shell integration is what makes commands, exit codes and durations visible
 # over the API. Without it the supervision layer is dark: /api/.../commands
@@ -139,4 +139,4 @@ EXPOSE 3418
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
   CMD curl -fsS -m 5 -o /dev/null "http://127.0.0.1:${KITTERM_PORT:-3418}/api/health" || exit 1
 
-ENTRYPOINT ["/usr/local/bin/agentbox-entrypoint"]
+ENTRYPOINT ["/usr/local/bin/kitbox-entrypoint"]
