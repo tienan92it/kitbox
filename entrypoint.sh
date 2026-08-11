@@ -24,7 +24,7 @@ say() { echo "[box] $*"; }
 die() { echo "[box] ERROR: $*" >&2; exit 1; }
 
 as_user() {
-  su vscode -c "cd $WORKSPACE 2>/dev/null || cd /home/vscode; \
+  su vscode -c "cd '$WORKSPACE' 2>/dev/null || cd /home/vscode; \
                 PATH=$PATH SHELL=/bin/bash $1"
 }
 
@@ -151,11 +151,27 @@ mint_token() {
   esac
 }
 
+# A stored token is worthless if the daemon's own store was wiped without this
+# file, so prove it before printing it in a URL.
+#
+# Not by asking loopback: the daemon trusts every loopback peer unconditionally
+# and never looks at the token, so `127.0.0.1/api/health?token=anything` returns
+# 200 and proves nothing. Naming the trusted host is what marks a request as
+# arriving from outside — the same grading a phone gets through the proxy.
+token_works() {
+  if [ -n "${FQDN:-}" ]; then
+    curl -fsS -m 5 -o /dev/null -H "Host: $FQDN" \
+         "http://127.0.0.1:$PORT/api/health?token=$1" 2>/dev/null
+  else
+    # Local mode has no trusted host to name, so compare against the store
+    # instead: no `phone` entry means this file outlived the hash it matched.
+    as_user "kitterm token list" 2>/dev/null | grep -q "^phone[[:space:]]"
+  fi
+}
+
 TOKEN="$(cat "$TOKEN_FILE" 2>/dev/null || true)"
 if [ -n "$TOKEN" ]; then
-  # A stored token is worthless if the daemon's own store was wiped without
-  # this file. Prove it still authenticates before printing it in a URL.
-  if ! curl -fsS -m 5 -o /dev/null "http://127.0.0.1:$PORT/api/health?token=$TOKEN" 2>/dev/null; then
+  if ! token_works "$TOKEN"; then
     say "the stored token no longer authenticates; minting a new one"
     TOKEN="$(mint_token || true)"
   else
@@ -181,5 +197,24 @@ echo "================================================================"
 echo
 
 say "box is up; leave this container running"
-# The daemon and its shells are detached; this just keeps the container alive.
-tail -f /dev/null
+
+# The daemon and its shells are detached, so this process is both what keeps
+# the container alive and the only thing that can notice the daemon dying.
+# Sitting on `tail -f /dev/null` would keep the container "running" around a
+# dead daemon forever, and `restart: unless-stopped` would never fire.
+shutdown() {
+  say "shutting down"
+  as_user "kitterm stop" >/dev/null 2>&1 || true
+  exit 0
+}
+trap shutdown TERM INT
+
+while true; do
+  # Backgrounded, because bash defers a trap until the foreground command
+  # returns — a plain `sleep 10` would make every `docker stop` wait out its
+  # full ten-second grace period before the container died.
+  sleep 10 & wait $! || true
+  curl -fsS -m 5 -o /dev/null "http://127.0.0.1:$PORT/api/health" 2>/dev/null \
+    || die "kitterm stopped answering on port $PORT. Exiting so the container
+       restarts. Log: /home/vscode/.kitterm/server.log"
+done

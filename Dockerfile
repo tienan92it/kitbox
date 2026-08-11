@@ -48,11 +48,18 @@ RUN curl -fsSL https://tailscale.com/install.sh | sh \
 #
 # A tarball dropped into ./dist wins over the download — that is how you test a
 # kitterm build that has not been released yet.
-ARG KITTERM_VERSION=v0.14.0
+ARG KITTERM_VERSION=v0.15.0
 ARG KITTERM_REPO=tienan92it/kitterm
 ARG TARGETARCH
 COPY dist/ /tmp/localdist/
 RUN set -eu; \
+    # Set by BuildKit, empty under the legacy builder — which would then match
+    # every arch's tarball with a glob and install the wrong binary.
+    if [ -z "${TARGETARCH:-}" ]; then \
+      echo "error: TARGETARCH is empty. Build with BuildKit (DOCKER_BUILDKIT=1," >&2; \
+      echo "       or docker buildx build) so the right tarball is selected." >&2; \
+      exit 1; \
+    fi; \
     LOCAL="$(find /tmp/localdist -name "kitterm-*-linux-${TARGETARCH}.tar.gz" | head -1)"; \
     if [ -n "$LOCAL" ]; then \
       echo "using local tarball $LOCAL"; \
@@ -60,7 +67,13 @@ RUN set -eu; \
     else \
       BASE="https://github.com/${KITTERM_REPO}/releases/download/${KITTERM_VERSION}"; \
       NAME="kitterm-${KITTERM_VERSION}-linux-${TARGETARCH}.tar.gz"; \
-      curl -fsSL -o /tmp/kitterm.tar.gz "$BASE/$NAME"; \
+      curl -fsSL -o /tmp/kitterm.tar.gz "$BASE/$NAME" || { \
+        echo "error: ${KITTERM_REPO} ${KITTERM_VERSION} publishes no $NAME." >&2; \
+        echo "       Pick a release that ships Linux tarballs with" >&2; \
+        echo "       --build-arg KITTERM_VERSION=vX.Y.Z, or build one yourself and" >&2; \
+        echo "       drop it in ./dist — see the README." >&2; \
+        exit 1; \
+      }; \
       curl -fsSL -o /tmp/kitterm.sha256 "$BASE/$NAME.sha256" || true; \
       if [ -s /tmp/kitterm.sha256 ]; then \
         echo "$(cat /tmp/kitterm.sha256)  /tmp/kitterm.tar.gz" | sha256sum -c -; \
@@ -110,4 +123,12 @@ RUN mkdir -p /home/vscode/.kitterm /home/vscode/.claude /home/vscode/.codex \
 ENV SHELL=/bin/bash
 WORKDIR /workspace
 EXPOSE 3418
+
+# In the image rather than compose, so `docker run` gets it too. The entrypoint
+# outlives a crashed daemon by design — it needs to be alive to report the
+# crash — so container liveness is not evidence that anything is being served.
+# Loopback is trusted by the daemon, hence no token here.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+  CMD curl -fsS -m 5 -o /dev/null "http://127.0.0.1:${KITTERM_PORT:-3418}/api/health" || exit 1
+
 ENTRYPOINT ["/usr/local/bin/agentbox-entrypoint"]

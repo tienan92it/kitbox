@@ -62,6 +62,7 @@ docker run -d --name agentbox --env-file .env \
   -v agentbox-ts:/var/lib/tailscale \
   -v agentbox-kitterm:/home/vscode/.kitterm \
   -v agentbox-claude:/home/vscode/.claude \
+  -v agentbox-codex:/home/vscode/.codex \
   -v agentbox-work:/workspace \
   ghcr.io/tienan92it/agentbox:latest
 ```
@@ -104,18 +105,22 @@ docker compose build --build-arg AGENTS=claude,codex,opencode
 Adding one is a file: drop `agents/<name>.sh` in and ask for it by name.
 
 Most agents can log in interactively in the browser terminal, which is easier
-than managing API keys. Their credentials persist in the `claude` volume.
+than managing API keys. Claude and Codex keep their credentials on the `claude`
+and `codex` volumes, so that login survives a restart. `grok` and `opencode`
+write elsewhere under `$HOME` and are not persisted — give them API keys in
+`.env`, or add a volume for their config directory.
 
 ## Why the volumes matter
 
-Four named volumes, and none is decoration:
+Five named volumes, and none is decoration:
 
 - `/var/lib/tailscale` — the node's identity. Without it every restart joins as
   a *new* machine, so `agentbox` becomes `agentbox-2`, then `-3`, and your
   bookmark breaks each time.
 - `/home/vscode/.kitterm` — the access token. Without it every restart mints a
   new one and the link you saved stops working.
-- `/home/vscode/.claude` — agent auth, so you log in once.
+- `/home/vscode/.claude` and `/home/vscode/.codex` — agent auth, so you log in
+  once.
 - `/workspace` — your code. Bind-mount a host directory here instead if you
   prefer.
 
@@ -157,7 +162,7 @@ The image downloads a kitterm release tarball. To test a build that has not
 shipped, drop it into `dist/` and it wins over the download:
 
 ```sh
-cd ../kitterm && ./scripts/build-release-linux.sh v0.14.0
-cp dist/kitterm-v0.14.0-linux-arm64.tar.gz ../agentbox/dist/
+cd ../kitterm && ./scripts/build-release-linux.sh v0.15.0
+cp dist/kitterm-v0.15.0-linux-arm64.tar.gz ../agentbox/dist/
 cd ../agentbox && docker compose build
 ```
