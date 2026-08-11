@@ -73,6 +73,10 @@ interface, and the token is then the only thing between the internet and a
 shell — remove the `ports:` mapping from `docker-compose.yml` if you are not
 using it.
 
+Before running this anywhere but your own machine, read
+[SECURITY.md](SECURITY.md): what ends up on the disk, and which deployments
+suit which work. Client code and personal projects do not want the same setup.
+
 ### Managed platforms, with no server to run
 
 Fly, Railway, Render and Azure Container Instances will all run this image, and
