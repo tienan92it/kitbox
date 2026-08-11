@@ -73,6 +73,42 @@ interface, and the token is then the only thing between the internet and a
 shell — remove the `ports:` mapping from `docker-compose.yml` if you are not
 using it.
 
+### Managed platforms, with no server to run
+
+Fly, Railway, Render and Azure Container Instances will all run this image, and
+in Tailscale mode it needs **no inbound networking at all** — it dials out and
+`tailscale serve` does the rest, so there is no port, hostname or load balancer
+to configure. What they will not give you is five volumes: one persistent disk
+per instance is the rule everywhere.
+
+`STATE_DIR` collapses the five into one. Point it at the mounted disk and the
+paths that must outlive a restart are gathered there:
+
+```sh
+docker run -d --env-file .env \
+  -e STATE_DIR=/data -v kitbox-data:/data \
+  ghcr.io/tienan92it/kitbox:latest
+```
+
+| On the volume | What it is |
+| --- | --- |
+| `/data/tailscale` | node identity — the stable hostname |
+| `/data/kitterm` | the token behind your bookmark |
+| `/data/claude`, `/data/codex` | agent logins |
+| `/data/workspace` | your code, unless `WORKSPACE_DIR` says otherwise |
+
+They are symlinked rather than moved, so leaving `STATE_DIR` unset keeps the
+five-volume compose setup working exactly as before — one image serves both.
+
+Anything outside the volume is gone on the next deploy, which is the point:
+redeploy as often as you like and the URL you bookmarked, the agent's login and
+the working tree all survive it.
+
+Also pick an instance that **does not sleep**. Scale-to-zero platforms — Cloud
+Run, App Runner, Cloudflare Containers — stop the container on idle and hand
+back a fresh disk, which ends the running command you left an agent working on.
+That is the one thing kitbox exists to prevent.
+
 ## Configuration
 
 Everything lives in `.env`; see `.env.example` for the full list. The ones that
@@ -85,6 +121,7 @@ matter:
 | `TS_SERVE_HTTP` | Serve without a certificate. See below. |
 | `AGENTS` | Build-time: which CLIs to install. `claude` is always in. |
 | `WORKSPACE_REPO` | Cloned into `/workspace` on first start. |
+| `STATE_DIR` | Gather all persistent state onto one volume. See above. |
 | `GIT_USER_NAME` / `GIT_USER_EMAIL` | Git identity for the agent's commits. |
 
 ### Agents

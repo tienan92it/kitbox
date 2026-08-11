@@ -28,6 +28,48 @@ as_user() {
                 PATH=$PATH SHELL=/bin/bash $1"
 }
 
+# --- single-volume mode --------------------------------------------------------
+# Managed container platforms hand an instance one persistent volume, not five:
+# "A Machine can only mount one volume at a time" is Fly's wording, and Railway,
+# Render and ACI have the same shape. Set STATE_DIR to that volume and every
+# path that has to outlive a restart is gathered into it.
+#
+# By symlink rather than by moving anything, so the five-volume compose setup —
+# which leaves STATE_DIR unset — keeps working untouched, and one image serves
+# both. Losing any of these costs something concrete: the tailnet identity is
+# the stable hostname, .kitterm is the token behind your bookmark, and .claude
+# is the login you would otherwise redo on every deploy.
+link_state() {
+  local live="$1" store="$STATE_DIR/$2" owner="$3"
+  # Nesting the store inside the path it replaces would have the rm below
+  # delete the state it just copied in.
+  case "$store" in "$live"|"$live"/*) die "STATE_DIR must not sit inside $live";; esac
+  mkdir -p "$store"
+  # Seed from the image's copy on first boot only. Re-seeding every boot would
+  # let an empty directory baked into the image overwrite real saved state.
+  if [ -d "$live" ] && [ ! -L "$live" ] && [ -z "$(ls -A "$store" 2>/dev/null)" ]; then
+    cp -a "$live/." "$store/" 2>/dev/null || true
+  fi
+  rm -rf "$live"
+  # `ln -sfn` onto the final path, never a staged link renamed into place: the
+  # rename follows the existing symlink and lands the new one inside its target.
+  ln -sfn "$store" "$live"
+  chown -R "$owner:$owner" "$store"
+}
+
+if [ -n "${STATE_DIR:-}" ]; then
+  say "single-volume mode: state lives in $STATE_DIR"
+  case "$STATE_DIR" in /*) ;; *) die "STATE_DIR must be an absolute path (got '$STATE_DIR')";; esac
+  mkdir -p "$STATE_DIR" || die "cannot write to STATE_DIR=$STATE_DIR — is the volume mounted?"
+  # The workspace is already relocatable, so point it at the volume instead of
+  # symlinking it — unless the operator named a path themselves.
+  WORKSPACE="${WORKSPACE_DIR:-$STATE_DIR/workspace}"
+  link_state /home/vscode/.kitterm kitterm   vscode
+  link_state /home/vscode/.claude  claude    vscode
+  link_state /home/vscode/.codex   codex     vscode
+  link_state /var/lib/tailscale    tailscale root   # tailscaled runs as root
+fi
+
 # --- state directories --------------------------------------------------------
 # A named volume created by an older image is root-owned, and the daemon then
 # cannot write its token. Repair rather than fail: this runs as root.
