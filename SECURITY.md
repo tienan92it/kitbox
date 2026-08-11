@@ -36,10 +36,12 @@ network. With no ACL it can reach every other device you own — laptop, NAS,
 internal dashboards. An API key costs you money and is revoked in thirty
 seconds. A tailnet foothold is a way into everything else.
 
-**The access token is a shell, and it types.** The entrypoint always passes
-`--agent-control`, which enables `POST /api/sessions/<id>/input`. Whoever holds
-the token does not just watch your terminal, they drive it. This is not
-currently configurable.
+**The access token is a shell, and by default it types.** `--agent-control`
+enables `POST /api/sessions/<id>/input`, so whoever holds the token drives your
+terminal rather than watching it. It is on unless you set `AGENT_CONTROL=0`,
+which closes that route and nothing else — the browser terminal keeps working,
+because its keystrokes go over the WebSocket, which is graded by token, not by
+that flag.
 
 **Your credentials must be readable by the box**, so they are readable by
 whoever runs the box. There is no way around this. Encryption at rest defends
@@ -135,8 +137,8 @@ For that work:
 - Tag the node and give it no outbound rights, as above.
 - One box per client. Shared `workspace/` volumes leak between engagements.
 - No `WORKSPACE_REPO` pointing at a client repo on a box you did not provision.
-- Remember `--agent-control` is always on and cannot be disabled. If your
-  threat model cannot accept "the token types", kitbox is the wrong tool.
+- Set `AGENT_CONTROL=0`. A leaked token can then watch the session but not type
+  into it, and you lose nothing you use from a phone.
 - Wipe the volumes when the engagement ends. `docker volume rm` the lot, or
   destroy the disk.
 

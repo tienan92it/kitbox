@@ -126,6 +126,7 @@ matter:
 | `AGENTS` | Build-time: which CLIs to install. `claude` is always in. |
 | `WORKSPACE_REPO` | Cloned into `/workspace` on first start. |
 | `STATE_DIR` | Gather all persistent state onto one volume. See above. |
+| `AGENT_CONTROL` | `0` closes the HTTP input route, so a token watches but cannot type. |
 | `GIT_USER_NAME` / `GIT_USER_EMAIL` | Git identity for the agent's commits. |
 
 ### Agents

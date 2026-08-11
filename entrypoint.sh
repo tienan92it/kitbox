@@ -102,6 +102,24 @@ if [ -n "${GH_TOKEN:-}" ]; then
   as_user "gh auth setup-git" >/dev/null 2>&1 || true
 fi
 
+# --- agent control -------------------------------------------------------------
+# --agent-control opens POST /api/sessions/<id>/input, so anything holding a
+# full-grade token can type into a shell rather than only watch one. On unless
+# you say otherwise, because driving an agent from a phone is what the box is
+# for — but a leaked token is then a keyboard, not a window, so set
+# AGENT_CONTROL=0 where that is not a risk you will take.
+#
+# The browser terminal is unaffected either way: its keystrokes travel over the
+# WebSocket, which the daemon grades by token, not by this flag. Turning this
+# off closes the HTTP write route and nothing else.
+case "$(printf '%s' "${AGENT_CONTROL:-1}" | tr '[:upper:]' '[:lower:]')" in
+  0|false|no|off)
+    AGENT_CONTROL_FLAG=""
+    say "agent control off — POST /api/sessions/<id>/input is closed" ;;
+  *)
+    AGENT_CONTROL_FLAG="--agent-control" ;;
+esac
+
 # --- remote access ------------------------------------------------------------
 if [ -n "${TS_AUTHKEY:-}" ]; then
   say "starting tailscaled (userspace networking)"
@@ -166,12 +184,12 @@ $(tail -20 /var/log/tailscaled.log 2>/dev/null)"
   # tailscale reaches the daemon over loopback, so they must present a token.
   # The proxy is a boundary, not a bypass.
   say "starting kitterm, trusting $FQDN"
-  as_user "kitterm start --port $PORT --agent-control --trusted-host $FQDN" \
+  as_user "kitterm start --port $PORT $AGENT_CONTROL_FLAG --trusted-host $FQDN" \
     || die "kitterm failed to start"
   URL_BASE="$SCHEME://$FQDN"
 else
   say "no TS_AUTHKEY — local mode, binding all interfaces in this container"
-  as_user "kitterm start --port $PORT --lan --agent-control" \
+  as_user "kitterm start --port $PORT --lan $AGENT_CONTROL_FLAG" \
     || die "kitterm failed to start"
   URL_BASE="http://localhost:${PUBLISHED_PORT:-$PORT}"
 fi
