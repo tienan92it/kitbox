@@ -48,7 +48,7 @@ RUN curl -fsSL https://tailscale.com/install.sh | sh \
 #
 # A tarball dropped into ./dist wins over the download — that is how you test a
 # kitterm build that has not been released yet.
-ARG KITTERM_VERSION=v0.15.0
+ARG KITTERM_VERSION=v0.15.1
 ARG KITTERM_REPO=tienan92it/kitterm
 ARG TARGETARCH
 COPY dist/ /tmp/localdist/
@@ -60,7 +60,15 @@ RUN set -eu; \
       echo "       or docker buildx build) so the right tarball is selected." >&2; \
       exit 1; \
     fi; \
-    LOCAL="$(find /tmp/localdist -name "kitterm-*-linux-${TARGETARCH}.tar.gz" | head -1)"; \
+    # The pinned version first. A tarball left in ./dist by an older build wins
+    # a bare glob, so without this a stale binary silently overrides the pin and
+    # the image reports a version nobody asked for.
+    LOCAL="$(find /tmp/localdist -name "kitterm-${KITTERM_VERSION}-linux-${TARGETARCH}.tar.gz" | head -1)"; \
+    if [ -z "$LOCAL" ]; then \
+      LOCAL="$(find /tmp/localdist -name "kitterm-*-linux-${TARGETARCH}.tar.gz" | head -1)"; \
+      [ -z "$LOCAL" ] \
+        || echo "warning: ./dist has no ${KITTERM_VERSION} tarball; $LOCAL overrides the pin" >&2; \
+    fi; \
     if [ -n "$LOCAL" ]; then \
       echo "using local tarball $LOCAL"; \
       tar -xzf "$LOCAL" -C /usr/local; \

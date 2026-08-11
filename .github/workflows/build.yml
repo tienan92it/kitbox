@@ -50,7 +50,7 @@ jobs:
           platforms: ${{ matrix.platform }}
           build-args: |
             AGENTS=${{ vars.AGENTS || 'claude,codex' }}
-            KITTERM_VERSION=${{ vars.KITTERM_VERSION || 'v0.15.0' }}
+            KITTERM_VERSION=${{ vars.KITTERM_VERSION || 'v0.15.1' }}
           cache-from: type=gha,scope=${{ matrix.platform }}
           cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true

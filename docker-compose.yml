@@ -13,7 +13,7 @@ services:
       context: .
       args:
         AGENTS: ${AGENTS:-claude}
-        KITTERM_VERSION: ${KITTERM_VERSION:-v0.15.0}
+        KITTERM_VERSION: ${KITTERM_VERSION:-v0.15.1}
     container_name: ${TS_HOSTNAME:-agentbox}
     restart: unless-stopped
     env_file: .env
