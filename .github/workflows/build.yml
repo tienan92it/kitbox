@@ -5,7 +5,10 @@ on:
     branches: [main]
     tags: ["v*"]
   workflow_dispatch:
-  # The image pins a kitterm release; rebuild when a new one lands.
+  # Weekly, for base-image security updates and newer agent CLIs, which install
+  # at @latest. It cannot pick up a newer kitterm — that is pinned on purpose,
+  # so a rebuild of the same commit produces the same daemon. check-kitterm
+  # below is what tells you the pin has fallen behind.
   schedule:
     - cron: "0 6 * * 1"
 
@@ -18,6 +21,26 @@ permissions:
   packages: write
 
 jobs:
+  # The pin is deliberate, so nothing here bumps it automatically — a build that
+  # silently changes the daemon underneath you is worse than one that is a week
+  # behind. This just makes falling behind visible: a red weekly run instead of
+  # a rebuild that was never capable of noticing. It is a separate job, so the
+  # image still publishes when the pin is stale.
+  check-kitterm:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pinned=$(sed -n 's/^ARG KITTERM_VERSION=//p' Dockerfile)
+          latest=$(gh release view -R tienan92it/kitterm --json tagName -q .tagName)
+          echo "pinned: $pinned    latest: $latest"
+          [ "$pinned" = "$latest" ] && exit 0
+          echo "::error::kitbox pins kitterm $pinned but $latest has shipped. Bump Dockerfile, docker-compose.yml and .github/workflows/build.yml, then verify a build before releasing."
+          exit 1
+
   # One job per architecture on a native runner. Emulating a Swift-era image
   # under QEMU turns a three-minute build into half an hour, and the tarball is
   # prebuilt anyway, so there is nothing to gain from it.
@@ -50,7 +73,7 @@ jobs:
           platforms: ${{ matrix.platform }}
           build-args: |
             AGENTS=${{ vars.AGENTS || 'claude,codex' }}
-            KITTERM_VERSION=${{ vars.KITTERM_VERSION || 'v0.15.1' }}
+            KITTERM_VERSION=${{ vars.KITTERM_VERSION || 'v0.15.2' }}
           cache-from: type=gha,scope=${{ matrix.platform }}
           cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
