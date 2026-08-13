@@ -1,0 +1,637 @@
+#!/usr/bin/env bash
+# kitbox — put a coding agent in a box, with this project inside it.
+#
+#   cd ~/my-project
+#   kitbox init      # asks only what it cannot work out
+#   kitbox deploy    # box up, prints the URL to open on your phone
+#
+# Runs the published image, so nothing here needs this repository cloned. The
+# only thing required on the host is docker — or ssh to a host that has it.
+#
+# Written for bash 3.2, because that is what macOS ships.
+set -euo pipefail
+
+VERSION=0.1.0
+IMAGE_DEFAULT=ghcr.io/tienan92it/kitbox:latest
+KITBOX_HOME=${KITBOX_HOME:-$HOME/.kitbox}
+CONF_NAME_FILE=.kitbox.conf
+
+# --- output -------------------------------------------------------------------
+say()  { printf '%s\n' "$*"; }
+info() { printf '  %s\n' "$*"; }
+ok()   { printf '  \033[32mok\033[0m    %s\n' "$*"; }
+bad()  { printf '  \033[31mFAIL\033[0m  %s\n' "$*"; }
+warn() { printf '\033[33mnote:\033[0m %s\n' "$*" >&2; }
+die()  { printf 'kitbox: %s\n' "$*" >&2; exit 1; }
+
+# --- small helpers ------------------------------------------------------------
+lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+
+slug() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]' \
+    | sed 's/[^a-z0-9-]/-/g; s/--*/-/g; s/^-//; s/-*$//'
+}
+
+hash6() {
+  if command -v shasum >/dev/null 2>&1; then shasum; else sha1sum; fi | cut -c1-6
+}
+
+# Prompts read from the terminal, not stdin, so they still work when output is
+# being piped somewhere.
+ask() {
+  local prompt="$1" default="${2:-}" reply=""
+  if [ -n "$default" ]; then printf '%s [%s]: ' "$prompt" "$default" >&2
+  else printf '%s: ' "$prompt" >&2; fi
+  IFS= read -r reply </dev/tty || true
+  printf '%s' "${reply:-$default}"
+}
+
+ask_secret() {
+  local prompt="$1" reply=""
+  printf '%s: ' "$prompt" >&2
+  IFS= read -rs reply </dev/tty || true
+  printf '\n' >&2
+  printf '%s' "$reply"
+}
+
+ask_yn() {           # ask_yn <prompt> <y|n default>  -> returns 0 for yes
+  local prompt="$1" default="${2:-n}" reply=""
+  local hint="y/N"; [ "$default" = y ] && hint="Y/n"
+  printf '%s [%s]: ' "$prompt" "$hint" >&2
+  IFS= read -r reply </dev/tty || true
+  reply=$(lower "${reply:-$default}")
+  case "$reply" in y|yes) return 0 ;; *) return 1 ;; esac
+}
+
+# --- project resolution -------------------------------------------------------
+# Walk up for a config, like git does, so every command works from any
+# subdirectory. Before `init` there is nothing to find, so fall back to the git
+# root and then to here.
+find_root() {
+  local dir="$PWD"
+  while [ "$dir" != / ] && [ -n "$dir" ]; do
+    [ -f "$dir/$CONF_NAME_FILE" ] && { printf '%s' "$dir"; return 0; }
+    dir=$(dirname "$dir")
+  done
+  git rev-parse --show-toplevel 2>/dev/null || printf '%s' "$PWD"
+}
+
+# A box belongs to a repository, not to a checkout: two clones of the same
+# project share one id, two different projects never collide.
+project_id() {
+  local root="$1" seed name
+  name=$(slug "$(basename "$root")")
+  seed=$(git -C "$root" remote get-url origin 2>/dev/null || true)
+  [ -n "$seed" ] || seed="$root"
+  printf '%s-%s' "$name" "$(printf '%s' "$seed" | hash6)"
+}
+
+# --- config -------------------------------------------------------------------
+# .kitbox.conf is committed, so it is parsed rather than sourced: a repository
+# you cloned must not be able to run code by putting it in a config file.
+CONF_NAME=""; CONF_TARGET=""; CONF_SSH_HOST=""; CONF_HOSTNAME=""
+CONF_AGENTS=""; CONF_TZ=""; CONF_REPO=""; CONF_AGENT_CONTROL=""
+CONF_IMAGE=""; CONF_PORT=""
+
+read_conf() {
+  local file="$1" line key val
+  [ -f "$file" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ''|\#*) continue ;; esac
+    case "$line" in *=*) ;; *) continue ;; esac
+    key=$(printf '%s' "${line%%=*}" | tr -d '[:space:]')
+    val=${line#*=}
+    # Tolerate quotes a human may have added; store the bare value.
+    val=$(printf '%s' "$val" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/^"\(.*\)"$/\1/; s/^'"'"'\(.*\)'"'"'$/\1/')
+    case "$key" in
+      NAME)          CONF_NAME=$val ;;
+      TARGET)        CONF_TARGET=$val ;;
+      SSH_HOST)      CONF_SSH_HOST=$val ;;
+      HOSTNAME)      CONF_HOSTNAME=$val ;;
+      AGENTS)        CONF_AGENTS=$val ;;
+      TZ)            CONF_TZ=$val ;;
+      WORKSPACE_REPO) CONF_REPO=$val ;;
+      AGENT_CONTROL) CONF_AGENT_CONTROL=$val ;;
+      IMAGE)         CONF_IMAGE=$val ;;
+      PUBLISHED_PORT) CONF_PORT=$val ;;
+      *) : ;;   # unknown keys are ignored, not executed
+    esac
+  done < "$file"
+}
+
+# Secrets never enter the project. They live beside the CLI's own state.
+secrets_file() { printf '%s/secrets/%s.env' "$KITBOX_HOME" "$1"; }
+proj_dir()     { printf '%s/projects/%s' "$KITBOX_HOME" "$1"; }
+
+SEC_TS_AUTHKEY=""; SEC_GH_TOKEN=""; SEC_ANTHROPIC=""; SEC_OPENAI=""
+read_secrets() {
+  local file="$1" line key val
+  [ -f "$file" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ''|\#*) continue ;; esac
+    case "$line" in *=*) ;; *) continue ;; esac
+    key=$(printf '%s' "${line%%=*}" | tr -d '[:space:]')
+    val=${line#*=}
+    case "$key" in
+      TS_AUTHKEY)        SEC_TS_AUTHKEY=$val ;;
+      GH_TOKEN)          SEC_GH_TOKEN=$val ;;
+      ANTHROPIC_API_KEY) SEC_ANTHROPIC=$val ;;
+      OPENAI_API_KEY)    SEC_OPENAI=$val ;;
+      *) : ;;
+    esac
+  done < "$file"
+}
+
+# compose reads these with dotenv rules, so a newline would truncate the file
+# and a stray quote would be stripped. Refuse rather than corrupt.
+# The newline below is literal on purpose: $(printf '\n') is stripped back to
+# an empty string by command substitution, and `case` would then match every
+# value against `**`.
+check_value() {
+  case "$2" in
+    *'
+'*) die "$1 contains a newline; remove it and run kitbox init again" ;;
+  esac
+}
+
+# --- target plumbing ----------------------------------------------------------
+COMPOSE_LOCAL=""
+compose_bin() {
+  if [ -n "$COMPOSE_LOCAL" ]; then printf '%s' "$COMPOSE_LOCAL"; return; fi
+  if docker compose version >/dev/null 2>&1; then COMPOSE_LOCAL="docker compose"
+  elif command -v docker-compose >/dev/null 2>&1; then COMPOSE_LOCAL="docker-compose"
+  else die "docker compose is not available. Install Docker, or see the README."; fi
+  printf '%s' "$COMPOSE_LOCAL"
+}
+
+remote_dir() { printf '.kitbox/%s' "$1"; }
+
+# Local mode publishes a port, and the whole point of this CLI is that you have
+# several projects. Without this the second one dies on "port is already
+# allocated", which says nothing about what to do next.
+port_in_use() { (exec 3<>/dev/tcp/127.0.0.1/"$1") >/dev/null 2>&1; }
+
+pick_free_port() {
+  local p="${1:-4990}" tries=0
+  while port_in_use "$p" && [ "$tries" -lt 50 ]; do
+    p=$((p + 1)); tries=$((tries + 1))
+  done
+  printf '%s' "$p"
+}
+
+# Every docker call goes through here, so local and ssh cannot drift apart.
+dock() {
+  if [ "$CONF_TARGET" = ssh ]; then
+    ssh -o BatchMode=yes "$CONF_SSH_HOST" docker "$@"
+  else
+    docker "$@"
+  fi
+}
+
+compose_up() {                       # $1 = project id
+  local id="$1"
+  if [ "$CONF_TARGET" = ssh ]; then
+    local rdir; rdir=$(remote_dir "$id")
+    ssh -o BatchMode=yes "$CONF_SSH_HOST" "mkdir -p '$rdir' && chmod 700 '$rdir'"
+    scp -q "$(proj_dir "$id")/docker-compose.yml" "$(proj_dir "$id")/.env" \
+        "$CONF_SSH_HOST:$rdir/"
+    ssh -o BatchMode=yes "$CONF_SSH_HOST" \
+        "cd '$rdir' && (docker compose up -d --pull always || docker-compose up -d --pull always)"
+  else
+    ( cd "$(proj_dir "$id")" && $(compose_bin) up -d --pull always )
+  fi
+}
+
+compose_down() {                     # $1 = id, $2 = "keep" | "wipe"
+  local id="$1" flag=""
+  [ "$2" = wipe ] && flag="-v"
+  if [ "$CONF_TARGET" = ssh ]; then
+    local rdir; rdir=$(remote_dir "$id")
+    ssh -o BatchMode=yes "$CONF_SSH_HOST" \
+        "cd '$rdir' 2>/dev/null && (docker compose down $flag || docker-compose down $flag)" || true
+  else
+    ( cd "$(proj_dir "$id")" && $(compose_bin) down $flag ) || true
+  fi
+}
+
+# --- rendering ----------------------------------------------------------------
+render() {                           # $1 = project id
+  local id="$1" dir env yml
+  dir=$(proj_dir "$id"); mkdir -p "$dir"; chmod 700 "$dir"
+  env="$dir/.env"; yml="$dir/docker-compose.yml"
+
+  : > "$env"; chmod 600 "$env"
+  {
+    printf '# Written by kitbox %s. Edit .kitbox.conf and re-run kitbox deploy.\n' "$VERSION"
+    printf 'TS_HOSTNAME=%s\n' "$CONF_HOSTNAME"
+    [ -n "$SEC_TS_AUTHKEY" ] && printf 'TS_AUTHKEY=%s\n' "$SEC_TS_AUTHKEY"
+    [ -n "$CONF_REPO" ]      && printf 'WORKSPACE_REPO=%s\n' "$CONF_REPO"
+    [ -n "$SEC_GH_TOKEN" ]   && printf 'GH_TOKEN=%s\n' "$SEC_GH_TOKEN"
+    [ -n "$SEC_ANTHROPIC" ]  && printf 'ANTHROPIC_API_KEY=%s\n' "$SEC_ANTHROPIC"
+    [ -n "$SEC_OPENAI" ]     && printf 'OPENAI_API_KEY=%s\n' "$SEC_OPENAI"
+    [ -n "$GIT_NAME" ]       && printf 'GIT_USER_NAME=%s\n' "$GIT_NAME"
+    [ -n "$GIT_EMAIL" ]      && printf 'GIT_USER_EMAIL=%s\n' "$GIT_EMAIL"
+    printf 'AGENT_CONTROL=%s\n' "${CONF_AGENT_CONTROL:-1}"
+    printf 'TZ=%s\n' "${CONF_TZ:-UTC}"
+    [ -z "$SEC_TS_AUTHKEY" ] && printf 'PUBLISHED_PORT=%s\n' "${CONF_PORT:-4990}"
+    true
+  } >> "$env"
+
+  # One volume, because STATE_DIR gathers every path that must outlive a deploy
+  # into it — the same arrangement a managed host would force on us.
+  {
+    printf '# Written by kitbox %s. Do not edit; edit .kitbox.conf instead.\n' "$VERSION"
+    printf 'services:\n'
+    printf '  kitbox:\n'
+    printf '    image: %s\n' "${CONF_IMAGE:-$IMAGE_DEFAULT}"
+    printf '    container_name: %s\n' "$CONF_HOSTNAME"
+    printf '    restart: unless-stopped\n'
+    printf '    env_file: .env\n'
+    printf '    environment:\n'
+    printf '      STATE_DIR: /data\n'
+    if [ -z "$SEC_TS_AUTHKEY" ]; then
+      # Local mode binds every interface in the container, so the published port
+      # is a real door. With a tailnet key the daemon binds loopback instead and
+      # nothing needs publishing.
+      printf '    ports:\n'
+      printf '      - "%s:3418"\n' "${CONF_PORT:-4990}"
+    fi
+    printf '    volumes:\n'
+    printf '      - data:/data\n'
+    printf 'volumes:\n'
+    printf '  data:\n'
+  } > "$yml"
+}
+
+# --- checks -------------------------------------------------------------------
+verify() {                           # $1 = project id
+  local failed=0
+  say "checks"
+
+  if [ "$CONF_TARGET" = ssh ]; then
+    if ssh -o BatchMode=yes -o ConnectTimeout=10 "$CONF_SSH_HOST" true 2>/dev/null; then
+      ok "ssh to $CONF_SSH_HOST"
+    else
+      bad "cannot ssh to $CONF_SSH_HOST without a password"
+      info "kitbox needs key-based access: ssh-copy-id $CONF_SSH_HOST"
+      failed=1
+    fi
+  fi
+
+  local os=""
+  os=$(dock version --format '{{.Server.Os}}' 2>/dev/null || true)
+  if [ "$os" = linux ]; then
+    ok "docker is running Linux containers"
+  else
+    bad "docker did not answer with a Linux engine${os:+ (got '$os')}"
+    info "start Docker; on Windows switch to Linux containers"
+    failed=1
+  fi
+
+  if [ -n "$CONF_REPO" ]; then
+    local url="$CONF_REPO"
+    if [ -n "$SEC_GH_TOKEN" ]; then
+      url=$(printf '%s' "$CONF_REPO" | sed "s#https://#https://$SEC_GH_TOKEN@#")
+    fi
+    if GIT_TERMINAL_PROMPT=0 git ls-remote "$url" >/dev/null 2>&1; then
+      ok "the workspace repository is reachable"
+    else
+      bad "cannot reach $CONF_REPO with the credentials given"
+      info "for a private repo, re-run kitbox init and supply a token"
+      failed=1
+    fi
+  fi
+
+  if [ -z "$SEC_TS_AUTHKEY" ] && [ "$CONF_TARGET" = local ]; then
+    # "Is it mine?" has to mean "is my box already publishing this exact port",
+    # not "is my box running" — otherwise moving a project onto a port another
+    # box holds sails straight past this check and fails in docker instead.
+    local port="${CONF_PORT:-4990}" mine=0
+    docker port "$CONF_HOSTNAME" 3418 2>/dev/null | grep -q ":$port\$" && mine=1
+    if port_in_use "$port" && [ "$mine" -eq 0 ]; then
+      bad "port $port is already in use by something else"
+      info "another kitbox, most likely. Set PUBLISHED_PORT in .kitbox.conf"
+      info "to a free one — $(pick_free_port "$port") is free right now."
+      failed=1
+    else
+      ok "port $port is available"
+    fi
+  fi
+
+  # Best effort: only meaningful where the tailscale CLI is installed.
+  if [ -n "$SEC_TS_AUTHKEY" ] && command -v tailscale >/dev/null 2>&1; then
+    if tailscale status 2>/dev/null | awk '{print $2}' | grep -qx "$CONF_HOSTNAME"; then
+      bad "a tailnet node named '$CONF_HOSTNAME' already exists"
+      info "delete it, or choose another HOSTNAME in .kitbox.conf — otherwise"
+      info "Tailscale appends a suffix and your bookmark will not match"
+      failed=1
+    else
+      ok "the tailnet name '$CONF_HOSTNAME' is free"
+    fi
+  fi
+
+  [ "$failed" -eq 0 ] || die "checks failed. Fix the above, or deploy --no-verify."
+  say ""
+}
+
+# --- commands -----------------------------------------------------------------
+GIT_NAME=""; GIT_EMAIL=""
+load_git_identity() {
+  local root="$1"
+  GIT_NAME=$(git -C "$root" config user.name 2>/dev/null || true)
+  GIT_EMAIL=$(git -C "$root" config user.email 2>/dev/null || true)
+}
+
+cmd_init() {
+  local root id conf assume_yes=0
+  local f_target="" f_ssh="" f_hostname="" f_agents="" f_repo="" f_tz="" f_ac=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --yes|-y)        assume_yes=1 ;;
+      --target)        f_target=$2; shift ;;
+      --ssh-host)      f_ssh=$2; shift ;;
+      --hostname)      f_hostname=$2; shift ;;
+      --agents)        f_agents=$2; shift ;;
+      --repo)          f_repo=$2; shift ;;
+      --tz)            f_tz=$2; shift ;;
+      --agent-control) f_ac=$2; shift ;;
+      *) die "unknown flag for init: $1" ;;
+    esac
+    shift
+  done
+
+  root=$(find_root); conf="$root/$CONF_NAME_FILE"
+  [ -f "$conf" ] && read_conf "$conf"
+  id=$(project_id "$root")
+  load_git_identity "$root"
+
+  local detected_repo detected_name
+  detected_repo=$(git -C "$root" remote get-url origin 2>/dev/null || true)
+  detected_name=$(basename "$root")
+
+  say "kitbox init — $detected_name"
+  say ""
+  if [ -n "$detected_repo" ]; then
+    info "repository   $detected_repo"
+  else
+    info "repository   none (greenfield: the workspace starts empty)"
+  fi
+  info "git identity ${GIT_NAME:-unset} <${GIT_EMAIL:-unset}>"
+  say ""
+
+  CONF_NAME=$(slug "$detected_name")
+  CONF_REPO=${f_repo:-${CONF_REPO:-$detected_repo}}
+  CONF_TZ=${f_tz:-${CONF_TZ:-$(host_tz)}}
+
+  if [ "$assume_yes" -eq 1 ]; then
+    CONF_TARGET=${f_target:-${CONF_TARGET:-local}}
+    CONF_SSH_HOST=${f_ssh:-$CONF_SSH_HOST}
+    CONF_HOSTNAME=${f_hostname:-${CONF_HOSTNAME:-$CONF_NAME}}
+    CONF_AGENTS=${f_agents:-${CONF_AGENTS:-claude}}
+    CONF_AGENT_CONTROL=${f_ac:-${CONF_AGENT_CONTROL:-1}}
+    SEC_TS_AUTHKEY=${TS_AUTHKEY:-$SEC_TS_AUTHKEY}
+    SEC_GH_TOKEN=${GH_TOKEN:-$SEC_GH_TOKEN}
+    SEC_ANTHROPIC=${ANTHROPIC_API_KEY:-$SEC_ANTHROPIC}
+    if [ -z "$SEC_TS_AUTHKEY" ] && [ "$CONF_TARGET" = local ]; then
+      CONF_PORT=${CONF_PORT:-$(pick_free_port 4990)}
+    fi
+  else
+    CONF_TARGET=$(ask "Deploy to (local|ssh)" "${CONF_TARGET:-local}")
+    if [ "$CONF_TARGET" = ssh ]; then
+      CONF_SSH_HOST=$(ask "  ssh destination (user@host)" "$CONF_SSH_HOST")
+      [ -n "$CONF_SSH_HOST" ] || die "an ssh target needs a destination"
+    fi
+
+    say ""
+    say "A Tailscale key puts the box on your tailnet, reachable from your phone."
+    say "Get one at https://login.tailscale.com/admin/settings/keys — make it"
+    say "ephemeral and tagged. Leave it blank to run in local mode instead."
+    SEC_TS_AUTHKEY=$(ask_secret "Tailscale auth key (blank to skip)")
+    if [ -n "$SEC_TS_AUTHKEY" ]; then
+      CONF_HOSTNAME=$(ask "Tailnet hostname" "${CONF_HOSTNAME:-$CONF_NAME}")
+    else
+      CONF_HOSTNAME=${CONF_HOSTNAME:-$CONF_NAME}
+      CONF_PORT=$(ask "Local mode: publish on port" "${CONF_PORT:-$(pick_free_port 4990)}")
+      warn "local mode binds every interface in the container. On a public-IP"
+      warn "host the token is the only thing in front of a shell."
+    fi
+
+    say ""
+    say "The published image carries claude and codex. Others need a built image."
+    CONF_AGENTS=$(ask "Agents" "${CONF_AGENTS:-claude}")
+    case ",$CONF_AGENTS," in
+      *,grok,*|*,opencode,*)
+        warn "grok and opencode are not in the published image. Build your own and"
+        warn "set IMAGE= in .kitbox.conf, or they will simply be absent." ;;
+    esac
+
+    if [ -n "$CONF_REPO" ] && ! GIT_TERMINAL_PROMPT=0 git ls-remote "$CONF_REPO" >/dev/null 2>&1; then
+      say ""
+      say "$CONF_REPO looks private — the box needs a token to clone it."
+      SEC_GH_TOKEN=$(ask_secret "GitHub token (blank to skip)")
+    fi
+
+    say ""
+    say "Agents can log in through the browser terminal, which is usually easier"
+    say "than managing keys. A key here is optional."
+    SEC_ANTHROPIC=$(ask_secret "ANTHROPIC_API_KEY (blank to skip)")
+
+    say ""
+    if ask_yn "Is this client work, or under an NDA?" n; then
+      CONF_AGENT_CONTROL=0
+      warn "AGENT_CONTROL=0 set: a leaked token can watch but not type."
+      warn "Do not run this on a managed host — see SECURITY.md. Self-host it."
+    else
+      CONF_AGENT_CONTROL=${f_ac:-1}
+    fi
+  fi
+
+  if [ -n "$CONF_REPO" ] && [ -n "$(git -C "$root" status --porcelain 2>/dev/null || true)" ]; then
+    warn "you have uncommitted changes; the box clones the remote, so they stay here"
+  fi
+
+  check_value TS_AUTHKEY "$SEC_TS_AUTHKEY"
+  check_value GH_TOKEN "$SEC_GH_TOKEN"
+
+  {
+    printf '# kitbox project config. Committed on purpose: no secrets live here.\n'
+    printf '# Secrets are in ~/.kitbox/secrets/. Run `kitbox init` to change either.\n'
+    printf 'NAME=%s\n' "$CONF_NAME"
+    printf 'TARGET=%s\n' "$CONF_TARGET"
+    [ -n "$CONF_SSH_HOST" ] && printf 'SSH_HOST=%s\n' "$CONF_SSH_HOST"
+    printf 'HOSTNAME=%s\n' "$CONF_HOSTNAME"
+    printf 'AGENTS=%s\n' "$CONF_AGENTS"
+    printf 'TZ=%s\n' "$CONF_TZ"
+    [ -n "$CONF_REPO" ]  && printf 'WORKSPACE_REPO=%s\n' "$CONF_REPO"
+    [ -n "$CONF_IMAGE" ] && printf 'IMAGE=%s\n' "$CONF_IMAGE"
+    [ -n "$CONF_PORT" ]  && printf 'PUBLISHED_PORT=%s\n' "$CONF_PORT"
+    printf 'AGENT_CONTROL=%s\n' "${CONF_AGENT_CONTROL:-1}"
+    true
+  } > "$conf"
+
+  mkdir -p "$(dirname "$(secrets_file "$id")")"
+  chmod 700 "$KITBOX_HOME" "$KITBOX_HOME/secrets" 2>/dev/null || true
+  local sf; sf=$(secrets_file "$id")
+  : > "$sf"; chmod 600 "$sf"
+  {
+    [ -n "$SEC_TS_AUTHKEY" ] && printf 'TS_AUTHKEY=%s\n' "$SEC_TS_AUTHKEY"
+    [ -n "$SEC_GH_TOKEN" ]   && printf 'GH_TOKEN=%s\n' "$SEC_GH_TOKEN"
+    [ -n "$SEC_ANTHROPIC" ]  && printf 'ANTHROPIC_API_KEY=%s\n' "$SEC_ANTHROPIC"
+    [ -n "$SEC_OPENAI" ]     && printf 'OPENAI_API_KEY=%s\n' "$SEC_OPENAI"
+    true
+  } >> "$sf"
+
+  say ""
+  ok "wrote $CONF_NAME_FILE — commit it, it has no secrets in it"
+  ok "wrote $sf (0600)"
+  say ""
+  say "Next:  kitbox deploy"
+}
+
+host_tz() {
+  if [ -n "${TZ:-}" ]; then printf '%s' "$TZ"; return; fi
+  if [ -L /etc/localtime ]; then
+    readlink /etc/localtime | sed 's#.*/zoneinfo/##'
+  else
+    printf 'UTC'
+  fi
+}
+
+# Sets globals rather than echoing them. `die` inside a command substitution
+# only kills the subshell — the caller carries on with empty config and fails
+# much later, somewhere confusing — and any variable set in there is discarded
+# on the way out. So this is called plainly, never as $(load_all).
+PROJECT_ID=""; PROJECT_ROOT=""
+load_all() {
+  PROJECT_ROOT=$(find_root)
+  [ -f "$PROJECT_ROOT/$CONF_NAME_FILE" ] \
+    || die "no $CONF_NAME_FILE here. Run: kitbox init"
+  read_conf "$PROJECT_ROOT/$CONF_NAME_FILE"
+  PROJECT_ID=$(project_id "$PROJECT_ROOT")
+  read_secrets "$(secrets_file "$PROJECT_ID")"
+  load_git_identity "$PROJECT_ROOT"
+  [ -n "$CONF_HOSTNAME" ] || CONF_HOSTNAME=${CONF_NAME:-kitbox}
+  [ -n "$CONF_TARGET" ]   || CONF_TARGET=local
+}
+
+cmd_deploy() {
+  local no_verify=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --no-verify) no_verify=1 ;;
+      *) die "unknown flag for deploy: $1" ;;
+    esac
+    shift
+  done
+  load_all
+  render "$PROJECT_ID"
+  [ "$no_verify" -eq 1 ] || verify "$PROJECT_ID"
+
+  say "deploying $CONF_NAME to $CONF_TARGET${CONF_SSH_HOST:+ ($CONF_SSH_HOST)}"
+  compose_up "$PROJECT_ID"
+
+  printf 'waiting for the box to become healthy'
+  local i state=""
+  for i in $(seq 1 60); do
+    state=$(dock inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
+            "$CONF_HOSTNAME" 2>/dev/null || true)
+    [ "$state" = healthy ] && break
+    printf '.'; sleep 5
+  done
+  printf '\n'
+  if [ "$state" != healthy ]; then
+    bad "the box did not become healthy"
+    info "look at: kitbox logs"
+    exit 1
+  fi
+  ok "healthy"
+  say ""
+  cmd_url
+}
+
+box_url() {
+  # The entrypoint already prints the exact URL, scheme and tailnet name
+  # included. Reading it back beats reassembling it from parts we would have to
+  # guess at from out here.
+  dock logs "$CONF_HOSTNAME" 2>&1 \
+    | grep -o 'https\{0,1\}://[^ ]*token=[A-Za-z0-9_]*' | tail -1 || true
+}
+
+cmd_url() {
+  local url; load_all
+  url=$(box_url)
+  if [ -z "$url" ]; then
+    die "no URL in the box's logs yet. Try: kitbox logs"
+  fi
+  say "================================================================"
+  say "  Open this on your phone and your laptop:"
+  say "    $url"
+  say "================================================================"
+}
+
+cmd_logs()   { load_all; dock logs "$@" "$CONF_HOSTNAME"; }
+cmd_doctor() { load_all; dock exec "$CONF_HOSTNAME" doctor; }
+cmd_shell()  { load_all; dock exec -it "$CONF_HOSTNAME" bash; }
+
+cmd_destroy() {
+  local keep=0 assume_yes=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --keep-data) keep=1 ;;
+      --yes|-y)    assume_yes=1 ;;
+      *) die "unknown flag for destroy: $1" ;;
+    esac
+    shift
+  done
+  load_all
+  if [ "$keep" -eq 1 ]; then
+    compose_down "$PROJECT_ID" keep
+    ok "container removed; the volume and everything on it is still there"
+  else
+    say "This deletes the box AND its volume: the workspace, the agent's login,"
+    say "the access token and the tailnet identity all go with it."
+    if [ "$assume_yes" -eq 0 ]; then
+      ask_yn "Destroy $CONF_HOSTNAME and its data?" n || die "nothing done"
+    fi
+    compose_down "$PROJECT_ID" wipe
+    ok "box and volume removed"
+  fi
+}
+
+cmd_help() {
+  cat <<'EOF'
+kitbox — put a coding agent in a box, with this project inside it.
+
+  kitbox init [--yes ...]     configure this project (writes .kitbox.conf)
+  kitbox deploy [--no-verify] bring the box up and print its URL
+  kitbox url                  print the URL again
+  kitbox logs [-f]            the box's logs
+  kitbox doctor               run the box's own diagnostics
+  kitbox shell                a shell inside the box
+  kitbox destroy [--keep-data] [--yes]
+
+Config lives in .kitbox.conf next to your project and is safe to commit.
+Secrets live in ~/.kitbox/secrets/ and never enter the repository.
+
+Non-interactive:
+  TS_AUTHKEY=... kitbox init --yes --target local --hostname myproject
+EOF
+}
+
+main() {
+  local cmd="${1:-help}"; shift || true
+  case "$cmd" in
+    init)     cmd_init "$@" ;;
+    deploy|up) cmd_deploy "$@" ;;
+    url)      cmd_url ;;
+    logs)     cmd_logs "$@" ;;
+    doctor)   cmd_doctor ;;
+    shell|sh) cmd_shell ;;
+    destroy|down) cmd_destroy "$@" ;;
+    version|--version|-v) say "kitbox $VERSION" ;;
+    help|--help|-h) cmd_help ;;
+    *) die "unknown command '$cmd'. Try: kitbox help" ;;
+  esac
+}
+
+main "$@"

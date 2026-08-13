@@ -12,15 +12,56 @@ the tools worth having when your only screen is a phone.
 
 ## Quick start
 
+Install the command once:
+
 ```sh
-git clone https://github.com/tienan92it/kitbox && cd kitbox
-cp .env.example .env
+curl -fsSL https://raw.githubusercontent.com/tienan92it/kitbox/main/install.sh | sh
 ```
 
-Put a Tailscale auth key in `.env`
-([get one](https://login.tailscale.com/admin/settings/keys)), then:
+Then, from inside any project — an existing repo or an empty directory:
 
 ```sh
+cd ~/my-project
+kitbox init      # asks only what it cannot work out for itself
+kitbox deploy    # a box comes up with this project and an agent in it
+```
+
+`init` reads your git remote, project name and git identity from where you are
+standing, so the only things it asks for are the ones it cannot know: where to
+deploy, a Tailscale key, and whether the work is sensitive. It writes
+`.kitbox.conf` — safe to commit, no secrets in it — and keeps the secrets in
+`~/.kitbox/`. A teammate clones your repo, runs `kitbox deploy` with their own
+keys, and gets the same box.
+
+`deploy` ends with the URL to open:
+
+```
+================================================================
+  Open this on your phone and your laptop:
+    https://my-project.tail1234.ts.net/?token=ktk_…
+================================================================
+```
+
+| | |
+| --- | --- |
+| `kitbox deploy` | bring the box up, or update it in place |
+| `kitbox url` | print the link again |
+| `kitbox logs -f` | follow the box's logs |
+| `kitbox doctor` | run the box's own diagnostics |
+| `kitbox shell` | a shell inside the box |
+| `kitbox destroy [--keep-data]` | take it down |
+
+Deploy to a VPS instead of this machine by setting `TARGET=ssh` and `SSH_HOST`
+in `.kitbox.conf`; everything else is identical, because both paths ship the
+same two generated files.
+
+## Running it by hand
+
+The CLI is a convenience over an ordinary image. To drive it yourself:
+
+```sh
+git clone https://github.com/tienan92it/kitbox && cd kitbox
+cp .env.example .env       # put a Tailscale auth key in it
 docker compose up -d
 docker compose logs
 ```

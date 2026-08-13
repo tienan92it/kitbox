@@ -1,0 +1,32 @@
+# What `kitbox init` writes into a project. Committed on purpose — there are no
+# secrets here, so a teammate can clone, run `kitbox deploy` with their own keys,
+# and get the same box. Secrets live in ~/.kitbox/secrets/.
+
+# Slug for this project. Used to name the box's state.
+NAME=my-project
+
+# local — the docker this machine can see.
+# ssh   — a host you can reach without a password. Set SSH_HOST too.
+TARGET=local
+#SSH_HOST=user@vps.example.com
+
+# The name the box takes on your tailnet, so the URL is stable.
+HOSTNAME=my-project
+
+# The published image carries claude and codex. Anything else needs an image you
+# built yourself — set IMAGE below.
+AGENTS=claude
+#IMAGE=ghcr.io/you/kitbox:latest
+
+TZ=UTC
+
+# Cloned into the workspace on first start. Blank means an empty workspace.
+WORKSPACE_REPO=https://github.com/you/my-project
+
+# 0 closes POST /api/sessions/<id>/input, so a leaked token can watch the
+# terminal but not type into it. See SECURITY.md.
+AGENT_CONTROL=1
+
+# Local mode only: the host port to publish. Ignored when a tailnet key is set,
+# because the daemon then binds loopback and only Tailscale reaches it.
+#PUBLISHED_PORT=4990
