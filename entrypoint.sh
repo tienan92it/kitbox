@@ -106,9 +106,20 @@ chown vscode:vscode "$WORKSPACE" 2>/dev/null || true
 
 if [ -n "${WORKSPACE_REPO:-}" ] && [ -z "$(ls -A "$WORKSPACE" 2>/dev/null)" ]; then
   say "cloning $WORKSPACE_REPO into $WORKSPACE"
-  as_user "git clone '$WORKSPACE_REPO' '$WORKSPACE'" \
-    || die "clone failed. For a private repo, mount an SSH key at
-       /home/vscode/.ssh or set GH_TOKEN and use an https:// URL."
+  # Loud, but not fatal. Dying here used to leave a container that restarted,
+  # failed the same way, and restarted again — and the one tool you would use to
+  # diagnose it is the terminal this box exists to serve. So the box comes up
+  # with an empty workspace and says exactly what went wrong; `doctor` repeats
+  # it, and you can fix the clone from inside.
+  if ! as_user "git clone '$WORKSPACE_REPO' '$WORKSPACE'"; then
+    say "ERROR: could not clone $WORKSPACE_REPO"
+    say "       The box is starting anyway, with an empty workspace, so you can"
+    say "       fix this from a terminal. Common causes:"
+    say "       - an ssh host alias from your laptop's ~/.ssh/config, which does"
+    say "         not exist in here — use the https:// URL instead"
+    say "       - a git@ URL with no key mounted at /home/vscode/.ssh"
+    say "       - a private repo over https:// with no GH_TOKEN set"
+  fi
 fi
 
 if [ -n "${GIT_USER_NAME:-}" ]; then

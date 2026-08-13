@@ -56,6 +56,45 @@ slug() {
 # Long absolute paths bury the useful part of a line.
 tilde() { printf '%s' "${1/#$HOME/~}"; }
 
+# The box has no copy of your ~/.ssh/config, so a remote like
+# git@github.com-work:me/app.git names a host that exists only on this machine.
+# Inside, the clone dies on "Could not resolve hostname" — the URL was never
+# portable. Convert SSH remotes to https, resolving any Host alias on the way.
+#
+# `ssh -G` is what makes aliases resolvable, but it answers with the SSH
+# endpoint: github.com-work comes back as ssh.github.com, which is not a web
+# host. So the well-known forges are mapped back to the name that serves git
+# over https.
+# Probe a remote the way the box will see it: no credential helper, no prompt.
+# Your keychain answers for a private repo and makes it look public, so init
+# would never ask for the token the box then needs — the clone fails inside,
+# with the box having been told the repo was reachable.
+git_reachable() {
+  GIT_TERMINAL_PROMPT=0 git -c credential.helper= ls-remote "$1" >/dev/null 2>&1
+}
+
+to_https() {
+  local url="$1" host="" path="" real=""
+  case "$url" in
+    https://*|http://*) printf '%s' "$url"; return 0 ;;
+    ssh://*)
+      url=${url#ssh://}; url=${url#*@}
+      host=${url%%/*}; host=${host%%:*}; path=${url#*/} ;;
+    *@*:*)
+      host=${url#*@}; host=${host%%:*}
+      path=${url#*:} ;;
+    *) printf '%s' "$url"; return 0 ;;
+  esac
+  real=$(ssh -G "$host" 2>/dev/null | awk '/^hostname /{print $2; exit}' || true)
+  [ -n "$real" ] && host=$real
+  case "$host" in
+    *github.com)    host=github.com ;;
+    *gitlab.com)    host=gitlab.com ;;
+    *bitbucket.org) host=bitbucket.org ;;
+  esac
+  printf 'https://%s/%s' "$host" "${path#/}"
+}
+
 hash6() {
   if command -v shasum >/dev/null 2>&1; then shasum; else sha1sum; fi | cut -c1-6
 }
@@ -317,11 +356,15 @@ verify() {                           # $1 = project id
     if [ -n "$SEC_GH_TOKEN" ]; then
       url=$(printf '%s' "$CONF_REPO" | sed "s#https://#https://$SEC_GH_TOKEN@#")
     fi
-    if GIT_TERMINAL_PROMPT=0 git ls-remote "$url" >/dev/null 2>&1; then
+    if git_reachable "$url"; then
       ok "the workspace repository is reachable"
     else
-      bad "cannot reach $CONF_REPO with the credentials given"
-      info "for a private repo, re-run kitbox init and supply a token"
+      bad "cannot reach $CONF_REPO with the credentials the box will have"
+      if [ -z "$SEC_GH_TOKEN" ]; then
+        info "it looks private and no token is set — re-run kitbox init"
+      else
+        info "the token may lack access to this repository"
+      fi
       failed=1
     fi
   fi
@@ -453,6 +496,16 @@ cmd_init() {
 
   CONF_NAME=$(slug "$detected_name")
   CONF_REPO=${f_repo:-${CONF_REPO:-$detected_repo}}
+  if [ -n "$CONF_REPO" ]; then
+    local portable; portable=$(to_https "$CONF_REPO")
+    if [ "$portable" != "$CONF_REPO" ]; then
+      warn "rewrote the remote so the box can use it:"
+      warn "  $CONF_REPO"
+      warn "  -> $portable"
+      warn "an ssh host alias only exists in your ~/.ssh/config, not in the box"
+      CONF_REPO=$portable
+    fi
+  fi
   CONF_TZ=${f_tz:-${CONF_TZ:-$(host_tz)}}
 
   if [ "$assume_yes" -eq 1 ]; then
@@ -501,7 +554,7 @@ cmd_init() {
         warn "set IMAGE= in .kitbox.conf, or they will simply be absent." ;;
     esac
 
-    if [ -n "$CONF_REPO" ] && ! GIT_TERMINAL_PROMPT=0 git ls-remote "$CONF_REPO" >/dev/null 2>&1; then
+    if [ -n "$CONF_REPO" ] && ! git_reachable "$CONF_REPO"; then
       hdr "That repository looks private"
       printf '    %sThe box needs a token to clone it. Fine-grained, this repo only.%s\n' "$C_DIM" "$C_OFF"
       SEC_GH_TOKEN=$(ask_secret "    github token")
