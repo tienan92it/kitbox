@@ -78,6 +78,28 @@ for d in /home/vscode/.kitterm /home/vscode/.claude /home/vscode/.codex; do
   [ "$(stat -c %U "$d")" = vscode ] || { say "fixing ownership of $d"; chown -R vscode:vscode "$d"; }
 done
 
+# Claude Code keeps its account state in ~/.claude.json — a file beside the
+# directory, not inside it. Persisting ~/.claude alone therefore loses the login
+# on every redeploy, which looks like the agent forgetting who you are.
+#
+# Park the real file inside the directory that is already persistent and leave a
+# symlink where the CLI looks for it. That covers a named volume and STATE_DIR
+# with nothing new to mount. Claude Code writes through the symlink rather than
+# replacing it, so the indirection survives its own updates.
+CLAUDE_JSON=/home/vscode/.claude.json
+CLAUDE_STORE=/home/vscode/.claude/claude.json
+if [ ! -L "$CLAUDE_JSON" ]; then
+  # A real file here is state from an image that predates this, worth keeping.
+  if [ -f "$CLAUDE_JSON" ] && [ ! -s "$CLAUDE_STORE" ]; then
+    say "moving ~/.claude.json onto persistent storage"
+    mv "$CLAUDE_JSON" "$CLAUDE_STORE"
+  fi
+  rm -f "$CLAUDE_JSON"
+  # Dangling on a fresh box is fine: the first write creates the target.
+  ln -sfn "$CLAUDE_STORE" "$CLAUDE_JSON"
+  chown -h vscode:vscode "$CLAUDE_JSON"
+fi
+
 # --- workspace and git --------------------------------------------------------
 mkdir -p "$WORKSPACE"
 chown vscode:vscode "$WORKSPACE" 2>/dev/null || true

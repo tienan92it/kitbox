@@ -185,6 +185,7 @@ project at least once.
 | Startup stops at `joining the tailnet` | The machine is waiting for approval at [admin/machines](https://login.tailscale.com/admin/machines). |
 | `403 non-loopback Host` | The URL's hostname is not the one the box trusts. Use the full `*.ts.net` name. |
 | `403 missing or invalid token` | Working as intended — add `?token=…`. |
+| The same, but only after a tab sat idle for hours | kitterm's auth cookie carries no `Max-Age`, so it is a session cookie and a phone that discards the browser session drops it. Open the `?token=…` link once more. Keep that link in a password manager rather than a bookmark. |
 | `/api/…/commands` is always `[]` | No shell integration, so no command marks. `doctor` checks this. |
 
 ### HTTPS vs HTTP
