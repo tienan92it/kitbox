@@ -17,12 +17,33 @@ KITBOX_HOME=${KITBOX_HOME:-$HOME/.kitbox}
 CONF_NAME_FILE=.kitbox.conf
 
 # --- output -------------------------------------------------------------------
+# Colour only for a human at a terminal. Piped into a file or a grep this emits
+# clean text — the escapes used to be unconditional, so anything reading kitbox
+# output had to strip them back out again.
+if { [ -t 1 ] || [ -t 2 ]; } && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-}" != dumb ]; then
+  C_OFF=$'\033[0m';  C_B=$'\033[1m';    C_DIM=$'\033[2m'
+  C_RED=$'\033[31m'; C_GRN=$'\033[32m'; C_YEL=$'\033[33m'
+  C_BLU=$'\033[34m'; C_CYN=$'\033[36m'
+else
+  C_OFF=""; C_B=""; C_DIM=""; C_RED=""; C_GRN=""; C_YEL=""; C_BLU=""; C_CYN=""
+fi
+
 say()  { printf '%s\n' "$*"; }
 info() { printf '  %s\n' "$*"; }
-ok()   { printf '  \033[32mok\033[0m    %s\n' "$*"; }
-bad()  { printf '  \033[31mFAIL\033[0m  %s\n' "$*"; }
-warn() { printf '\033[33mnote:\033[0m %s\n' "$*" >&2; }
-die()  { printf 'kitbox: %s\n' "$*" >&2; exit 1; }
+ok()   { printf '  %sok%s    %s\n' "$C_GRN" "$C_OFF" "$*"; }
+bad()  { printf '  %sFAIL%s  %s\n' "$C_RED" "$C_OFF" "$*"; }
+warn() { printf '%snote:%s %s\n'   "$C_YEL" "$C_OFF" "$*" >&2; }
+die()  { printf '%skitbox:%s %s\n' "$C_RED" "$C_OFF" "$*" >&2; exit 1; }
+
+# A heading and an aligned key/value row: the whole visual grammar.
+hdr() { printf '\n  %s%s%s\n' "$C_B" "$*" "$C_OFF"; }
+kv()  { printf '    %-11s %s%s%s\n' "$1" "$C_CYN" "$2" "$C_OFF"; }
+kvd() { printf '    %-11s %s%s%s\n' "$1" "$C_DIM" "$2" "$C_OFF"; }
+
+banner() {
+  printf '\n  %s%s▚ kitbox%s %s%s%s\n' "$C_B" "$C_BLU" "$C_OFF" "$C_DIM" "$VERSION" "$C_OFF"
+  printf '  %sa coding agent in a box, with your project inside it%s\n' "$C_DIM" "$C_OFF"
+}
 
 # --- small helpers ------------------------------------------------------------
 lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
@@ -31,6 +52,9 @@ slug() {
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]' \
     | sed 's/[^a-z0-9-]/-/g; s/--*/-/g; s/^-//; s/-*$//'
 }
+
+# Long absolute paths bury the useful part of a line.
+tilde() { printf '%s' "${1/#$HOME/~}"; }
 
 hash6() {
   if command -v shasum >/dev/null 2>&1; then shasum; else sha1sum; fi | cut -c1-6
@@ -266,7 +290,7 @@ render() {                           # $1 = project id
 # --- checks -------------------------------------------------------------------
 verify() {                           # $1 = project id
   local failed=0
-  say "checks"
+  hdr "Checks"
 
   if [ "$CONF_TARGET" = ssh ]; then
     if ssh -o BatchMode=yes -o ConnectTimeout=10 "$CONF_SSH_HOST" true 2>/dev/null; then
@@ -334,6 +358,47 @@ verify() {                           # $1 = project id
   say ""
 }
 
+# --- what you are standing on, and what you will get --------------------------
+# Two questions worth answering before the prompts start: which tools on this
+# machine kitbox is about to drive, and what is actually inside the box. Both
+# were previously invisible until something went wrong.
+mark()  { printf '    %s%s%s %-10s %s%s%s\n' "$2" "$1" "$C_OFF" "$3" "$C_DIM" "$4" "$C_OFF"; }
+have()  { mark "✓" "$C_GRN" "$1" "$2"; }
+lack()  { mark "×" "$C_YEL" "$1" "$2"; }
+
+show_host() {
+  hdr "On this machine"
+  local v
+  if v=$(docker version --format '{{.Server.Version}}' 2>/dev/null) && [ -n "$v" ]; then
+    have docker "$v"
+  else
+    lack docker "not responding — start it before kitbox deploy"
+  fi
+  if docker compose version >/dev/null 2>&1; then have compose "docker compose"
+  elif command -v docker-compose >/dev/null 2>&1; then have compose "docker-compose"
+  else lack compose "needed to bring the box up"; fi
+  v=$(git --version 2>/dev/null | awk '{print $3}' || true)
+  [ -n "$v" ] && have git "$v" || lack git "used to read this project's remote"
+  if command -v tailscale >/dev/null 2>&1; then
+    have tailscale "checks the box's name is free"
+  else
+    lack tailscale "optional — without it the name check is skipped"
+  fi
+}
+
+show_box() {
+  hdr "Inside the box"
+  kv  "terminal" "kitterm — a real terminal, served to your phone"
+  kv  "agents" "$(printf '%s' "$CONF_AGENTS" | tr ',' ' ')"
+  if [ -n "$SEC_TS_AUTHKEY" ]; then
+    kv "network" "tailscale — private, no ports opened"
+  else
+    kv "network" "local — published on port ${CONF_PORT:-4990}"
+  fi
+  kv  "tools" "git gh ripgrep fd jq tmux node python3"
+  kvd "" "shell integration on, so commands and exit codes are indexed"
+}
+
 # --- commands -----------------------------------------------------------------
 GIT_NAME=""; GIT_EMAIL=""
 load_git_identity() {
@@ -369,14 +434,21 @@ cmd_init() {
   detected_repo=$(git -C "$root" remote get-url origin 2>/dev/null || true)
   detected_name=$(basename "$root")
 
-  say "kitbox init — $detected_name"
-  say ""
+  banner
+  show_host
+  hdr "This project"
+  kv "name" "$detected_name"
   if [ -n "$detected_repo" ]; then
-    info "repository   $detected_repo"
+    kv "repository" "$detected_repo"
   else
-    info "repository   none (greenfield: the workspace starts empty)"
+    kvd "repository" "none — greenfield, the workspace starts empty"
   fi
-  info "git identity ${GIT_NAME:-unset} <${GIT_EMAIL:-unset}>"
+  if [ -n "$GIT_NAME" ] || [ -n "$GIT_EMAIL" ]; then
+    kv "identity" "${GIT_NAME:-?} <${GIT_EMAIL:-?}>"
+  else
+    kvd "identity" "unset — the agent's commits would have no author"
+  fi
+  kv "timezone" "$(host_tz)"
   say ""
 
   CONF_NAME=$(slug "$detected_name")
@@ -396,29 +468,33 @@ cmd_init() {
       CONF_PORT=${CONF_PORT:-$(pick_free_port 4990)}
     fi
   else
-    CONF_TARGET=$(ask "Deploy to (local|ssh)" "${CONF_TARGET:-local}")
+    hdr "Where should it run?"
+    CONF_TARGET=$(ask "    local or ssh" "${CONF_TARGET:-local}")
     if [ "$CONF_TARGET" = ssh ]; then
-      CONF_SSH_HOST=$(ask "  ssh destination (user@host)" "$CONF_SSH_HOST")
+      CONF_SSH_HOST=$(ask "    ssh destination (user@host)" "$CONF_SSH_HOST")
       [ -n "$CONF_SSH_HOST" ] || die "an ssh target needs a destination"
     fi
 
-    say ""
-    say "A Tailscale key puts the box on your tailnet, reachable from your phone."
-    say "Get one at https://login.tailscale.com/admin/settings/keys — make it"
-    say "ephemeral and tagged. Leave it blank to run in local mode instead."
-    SEC_TS_AUTHKEY=$(ask_secret "Tailscale auth key (blank to skip)")
+    hdr "How will you reach it?"
+    printf '    %sA Tailscale key puts the box on your tailnet, so it is reachable%s\n' "$C_DIM" "$C_OFF"
+    printf '    %sfrom your phone and nothing is exposed. Make it ephemeral and%s\n' "$C_DIM" "$C_OFF"
+    printf '    %stagged: %slogin.tailscale.com/admin/settings/keys%s\n' "$C_DIM" "$C_OFF$C_CYN" "$C_OFF"
+    printf '    %sBlank runs in local mode instead.%s\n' "$C_DIM" "$C_OFF"
+    SEC_TS_AUTHKEY=$(ask_secret "    tailscale auth key")
     if [ -n "$SEC_TS_AUTHKEY" ]; then
-      CONF_HOSTNAME=$(ask "Tailnet hostname" "${CONF_HOSTNAME:-$CONF_NAME}")
+      CONF_HOSTNAME=$(ask "    tailnet hostname" "${CONF_HOSTNAME:-$CONF_NAME}")
     else
       CONF_HOSTNAME=${CONF_HOSTNAME:-$CONF_NAME}
-      CONF_PORT=$(ask "Local mode: publish on port" "${CONF_PORT:-$(pick_free_port 4990)}")
+      CONF_PORT=$(ask "    publish on port" "${CONF_PORT:-$(pick_free_port 4990)}")
       warn "local mode binds every interface in the container. On a public-IP"
       warn "host the token is the only thing in front of a shell."
     fi
 
-    say ""
-    say "The published image carries claude and codex. Others need a built image."
-    CONF_AGENTS=$(ask "Agents" "${CONF_AGENTS:-claude}")
+    hdr "Which agents?"
+    printf '    %sThe published image carries %sclaude%s %sand%s %scodex%s%s. Others need an%s\n' \
+      "$C_DIM" "$C_OFF$C_CYN" "$C_OFF" "$C_DIM" "$C_OFF" "$C_CYN" "$C_OFF" "$C_DIM" "$C_OFF"
+    printf '    %simage you built yourself.%s\n' "$C_DIM" "$C_OFF"
+    CONF_AGENTS=$(ask "    agents" "${CONF_AGENTS:-claude}")
     case ",$CONF_AGENTS," in
       *,grok,*|*,opencode,*)
         warn "grok and opencode are not in the published image. Build your own and"
@@ -426,18 +502,18 @@ cmd_init() {
     esac
 
     if [ -n "$CONF_REPO" ] && ! GIT_TERMINAL_PROMPT=0 git ls-remote "$CONF_REPO" >/dev/null 2>&1; then
-      say ""
-      say "$CONF_REPO looks private — the box needs a token to clone it."
-      SEC_GH_TOKEN=$(ask_secret "GitHub token (blank to skip)")
+      hdr "That repository looks private"
+      printf '    %sThe box needs a token to clone it. Fine-grained, this repo only.%s\n' "$C_DIM" "$C_OFF"
+      SEC_GH_TOKEN=$(ask_secret "    github token")
     fi
 
-    say ""
-    say "Agents can log in through the browser terminal, which is usually easier"
-    say "than managing keys. A key here is optional."
-    SEC_ANTHROPIC=$(ask_secret "ANTHROPIC_API_KEY (blank to skip)")
+    hdr "Credentials"
+    printf '    %sAgents can log in through the browser terminal, which is easier%s\n' "$C_DIM" "$C_OFF"
+    printf '    %sthan managing keys. Optional.%s\n' "$C_DIM" "$C_OFF"
+    SEC_ANTHROPIC=$(ask_secret "    anthropic api key")
 
-    say ""
-    if ask_yn "Is this client work, or under an NDA?" n; then
+    hdr "Sensitivity"
+    if ask_yn "    is this client work, or under an NDA?" n; then
       CONF_AGENT_CONTROL=0
       warn "AGENT_CONTROL=0 set: a leaked token can watch but not type."
       warn "Do not run this on a managed host — see SECURITY.md. Self-host it."
@@ -481,11 +557,13 @@ cmd_init() {
     true
   } >> "$sf"
 
-  say ""
-  ok "wrote $CONF_NAME_FILE — commit it, it has no secrets in it"
-  ok "wrote $sf (0600)"
-  say ""
-  say "Next:  kitbox deploy"
+  show_box
+
+  hdr "Written"
+  kv  "config" "$CONF_NAME_FILE — commit it, there are no secrets in it"
+  kvd "secrets" "$(tilde "$sf") (0600)"
+
+  printf '\n  %sNext%s  %skitbox deploy%s\n\n' "$C_B" "$C_OFF" "$C_CYN" "$C_OFF"
 }
 
 host_tz() {
@@ -527,10 +605,14 @@ cmd_deploy() {
   render "$PROJECT_ID"
   [ "$no_verify" -eq 1 ] || verify "$PROJECT_ID"
 
-  say "deploying $CONF_NAME to $CONF_TARGET${CONF_SSH_HOST:+ ($CONF_SSH_HOST)}"
+  hdr "Deploying"
+  kv "project" "$CONF_NAME"
+  kv "target" "$CONF_TARGET${CONF_SSH_HOST:+ — $CONF_SSH_HOST}"
+  kv "image" "${CONF_IMAGE:-$IMAGE_DEFAULT}"
+  say ""
   compose_up "$PROJECT_ID"
 
-  printf 'waiting for the box to become healthy'
+  printf '\n  waiting for the box'
   local i state=""
   for i in $(seq 1 60); do
     state=$(dock inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
@@ -563,10 +645,8 @@ cmd_url() {
   if [ -z "$url" ]; then
     die "no URL in the box's logs yet. Try: kitbox logs"
   fi
-  say "================================================================"
-  say "  Open this on your phone and your laptop:"
-  say "    $url"
-  say "================================================================"
+  printf '\n  %sOpen this on your phone and your laptop%s\n' "$C_B" "$C_OFF"
+  printf '  %s%s%s\n\n' "$C_CYN" "$url" "$C_OFF"
 }
 
 cmd_logs()   { load_all; dock logs "$@" "$CONF_HOSTNAME"; }
