@@ -11,7 +11,7 @@
 # Written for bash 3.2, because that is what macOS ships.
 set -euo pipefail
 
-VERSION=0.1.0
+VERSION=0.2.0
 IMAGE_DEFAULT=ghcr.io/tienan92it/kitbox:latest
 KITBOX_HOME=${KITBOX_HOME:-$HOME/.kitbox}
 CONF_NAME_FILE=.kitbox.conf

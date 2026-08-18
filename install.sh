@@ -27,6 +27,13 @@ head -1 "$tmp" | grep -q '^#!/usr/bin/env bash' \
   || { echo "install: $SRC did not look like the kitbox script" >&2; exit 1; }
 bash -n "$tmp" || { echo "install: the downloaded script does not parse" >&2; exit 1; }
 
+# Read the version already on the machine, so the install can report a change
+# rather than leaving you to guess whether it did anything.
+prev=""
+if command -v kitbox >/dev/null 2>&1; then
+  prev=$(kitbox version 2>/dev/null | awk '{print $2}')
+fi
+
 if [ -w "$PREFIX" ]; then
   install -m 755 "$tmp" "$PREFIX/kitbox"
 else
@@ -34,7 +41,24 @@ else
   sudo install -m 755 "$tmp" "$PREFIX/kitbox"
 fi
 
-echo "installed $("$PREFIX/kitbox" version) to $PREFIX/kitbox"
+new=$("$PREFIX/kitbox" version | awk '{print $2}')
+if [ -z "$prev" ]; then
+  echo "installed kitbox $new to $PREFIX/kitbox"
+elif [ "$prev" = "$new" ]; then
+  echo "kitbox $new reinstalled to $PREFIX/kitbox (no version change)"
+else
+  echo "kitbox $prev -> $new in $PREFIX/kitbox"
+fi
+
+# A copy earlier in PATH keeps winning after this install, and every command you
+# run afterwards is the old one. Say so rather than let it confuse a deploy.
+found=$(command -v kitbox 2>/dev/null || true)
+if [ -n "$found" ] && [ "$found" != "$PREFIX/kitbox" ]; then
+  echo
+  echo "warning: your PATH finds $found first, not $PREFIX/kitbox"
+  echo "         that copy reports version $("$found" version 2>/dev/null | awk '{print $2}')"
+  echo "         remove it, or put $PREFIX earlier in PATH"
+fi
 echo
 echo "Next, from inside any project:"
 echo "  kitbox init"

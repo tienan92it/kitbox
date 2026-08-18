@@ -41,6 +41,33 @@ jobs:
           echo "::error::kitbox pins kitterm $pinned but $latest has shipped. Bump Dockerfile, docker-compose.yml and .github/workflows/build.yml, then verify a build before releasing."
           exit 1
 
+  # The version sat at 0.1.0 through five changes to the CLI, so a user could not
+  # tell an old install from a current one. This makes that state impossible to
+  # push: change bin/kitbox, change VERSION.
+  check-version:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+      - run: |
+          if ! git rev-parse HEAD~1 >/dev/null 2>&1; then
+            echo "no parent commit; nothing to compare"
+            exit 0
+          fi
+          if git diff --quiet HEAD~1 HEAD -- bin/kitbox; then
+            echo "bin/kitbox unchanged"
+            exit 0
+          fi
+          now=$(sed -n 's/^VERSION=//p' bin/kitbox)
+          was=$(git show HEAD~1:bin/kitbox 2>/dev/null | sed -n 's/^VERSION=//p')
+          echo "VERSION was '${was:-none}', now '$now'"
+          if [ "$was" != "$now" ]; then
+            exit 0
+          fi
+          echo "::error::bin/kitbox changed but VERSION is still $now. Bump VERSION, so install.sh can report the upgrade and a user can tell which build they have."
+          exit 1
+
   # One job per architecture on a native runner. Emulating a Swift-era image
   # under QEMU turns a three-minute build into half an hour, and the tarball is
   # prebuilt anyway, so there is nothing to gain from it.
