@@ -23,6 +23,10 @@ TZ=UTC
 # Cloned into the workspace on first start. Blank means an empty workspace.
 WORKSPACE_REPO=https://github.com/you/my-project
 
+# The agent commits with this identity. kitbox init asks when git has none.
+GIT_USER_NAME=you
+GIT_USER_EMAIL=you@example.com
+
 # 0 closes POST /api/sessions/<id>/input, so a leaked token can watch the
 # terminal but not type into it. See SECURITY.md.
 AGENT_CONTROL=1

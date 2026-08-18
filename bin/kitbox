@@ -154,7 +154,7 @@ project_id() {
 # you cloned must not be able to run code by putting it in a config file.
 CONF_NAME=""; CONF_TARGET=""; CONF_SSH_HOST=""; CONF_HOSTNAME=""
 CONF_AGENTS=""; CONF_TZ=""; CONF_REPO=""; CONF_AGENT_CONTROL=""
-CONF_IMAGE=""; CONF_PORT=""
+CONF_IMAGE=""; CONF_PORT=""; CONF_GIT_NAME=""; CONF_GIT_EMAIL=""
 
 read_conf() {
   local file="$1" line key val
@@ -177,6 +177,8 @@ read_conf() {
       AGENT_CONTROL) CONF_AGENT_CONTROL=$val ;;
       IMAGE)         CONF_IMAGE=$val ;;
       PUBLISHED_PORT) CONF_PORT=$val ;;
+      GIT_USER_NAME)  CONF_GIT_NAME=$val ;;
+      GIT_USER_EMAIL) CONF_GIT_EMAIL=$val ;;
       *) : ;;   # unknown keys are ignored, not executed
     esac
   done < "$file"
@@ -444,10 +446,23 @@ show_box() {
 
 # --- commands -----------------------------------------------------------------
 GIT_NAME=""; GIT_EMAIL=""
+# The config wins over the host. A fresh server has no git identity, and the
+# agent's commits would then have no author.
 load_git_identity() {
   local root="$1"
-  GIT_NAME=$(git -C "$root" config user.name 2>/dev/null || true)
-  GIT_EMAIL=$(git -C "$root" config user.email 2>/dev/null || true)
+  GIT_NAME=${CONF_GIT_NAME:-$(git -C "$root" config user.name 2>/dev/null || true)}
+  GIT_EMAIL=${CONF_GIT_EMAIL:-$(git -C "$root" config user.email 2>/dev/null || true)}
+}
+
+normalise_repo() {
+  [ -n "$CONF_REPO" ] || return 0
+  local portable; portable=$(to_https "$CONF_REPO")
+  [ "$portable" = "$CONF_REPO" ] && return 0
+  warn "rewrote the repository so the box can use it:"
+  warn "  $CONF_REPO"
+  warn "  -> $portable"
+  warn "an ssh host alias only exists in your ~/.ssh/config, not in the box"
+  CONF_REPO=$portable
 }
 
 cmd_init() {
@@ -496,20 +511,15 @@ cmd_init() {
 
   CONF_NAME=$(slug "$detected_name")
   CONF_REPO=${f_repo:-${CONF_REPO:-$detected_repo}}
-  if [ -n "$CONF_REPO" ]; then
-    local portable; portable=$(to_https "$CONF_REPO")
-    if [ "$portable" != "$CONF_REPO" ]; then
-      warn "rewrote the remote so the box can use it:"
-      warn "  $CONF_REPO"
-      warn "  -> $portable"
-      warn "an ssh host alias only exists in your ~/.ssh/config, not in the box"
-      CONF_REPO=$portable
-    fi
-  fi
+  normalise_repo
   CONF_TZ=${f_tz:-${CONF_TZ:-$(host_tz)}}
 
   if [ "$assume_yes" -eq 1 ]; then
     CONF_TARGET=${f_target:-${CONF_TARGET:-local}}
+    case "$CONF_TARGET" in
+      local|ssh) ;;
+      *) die "--target must be 'local' or 'ssh', not '$CONF_TARGET'" ;;
+    esac
     CONF_SSH_HOST=${f_ssh:-$CONF_SSH_HOST}
     CONF_HOSTNAME=${f_hostname:-${CONF_HOSTNAME:-$CONF_NAME}}
     CONF_AGENTS=${f_agents:-${CONF_AGENTS:-claude}}
@@ -521,8 +531,31 @@ cmd_init() {
       CONF_PORT=${CONF_PORT:-$(pick_free_port 4990)}
     fi
   else
+    hdr "Your code"
+    if [ -n "$CONF_REPO" ]; then
+      printf '    %sFound this remote. Press enter to keep it, or type another.%s\n' "$C_DIM" "$C_OFF"
+    else
+      printf '    %sThe box clones a repository into its workspace. Leave this blank%s\n' "$C_DIM" "$C_OFF"
+      printf '    %sfor an empty workspace.%s\n' "$C_DIM" "$C_OFF"
+    fi
+    CONF_REPO=$(ask "    repository" "$CONF_REPO")
+    normalise_repo
+
+    if [ -z "$GIT_NAME" ] || [ -z "$GIT_EMAIL" ]; then
+      printf '    %sThe agent commits with this name. Git refuses a commit without it.%s\n' "$C_DIM" "$C_OFF"
+      GIT_NAME=$(ask "    git user.name" "${GIT_NAME:-$(id -un)}")
+      GIT_EMAIL=$(ask "    git user.email" "$GIT_EMAIL")
+    fi
+
     hdr "Where should it run?"
-    CONF_TARGET=$(ask "    local or ssh" "${CONF_TARGET:-local}")
+    # dock() treats anything that is not "ssh" as local, so a typo would send
+    # the box somewhere you did not choose, without saying so.
+    while :; do
+      CONF_TARGET=$(ask "    local or ssh" "${CONF_TARGET:-local}")
+      case "$CONF_TARGET" in local|ssh) break ;; esac
+      warn "answer 'local' or 'ssh'"
+      CONF_TARGET=""
+    done
     if [ "$CONF_TARGET" = ssh ]; then
       CONF_SSH_HOST=$(ask "    ssh destination (user@host)" "$CONF_SSH_HOST")
       [ -n "$CONF_SSH_HOST" ] || die "an ssh target needs a destination"
@@ -592,6 +625,8 @@ cmd_init() {
     printf 'AGENTS=%s\n' "$CONF_AGENTS"
     printf 'TZ=%s\n' "$CONF_TZ"
     [ -n "$CONF_REPO" ]  && printf 'WORKSPACE_REPO=%s\n' "$CONF_REPO"
+    [ -n "$GIT_NAME" ]   && printf 'GIT_USER_NAME=%s\n' "$GIT_NAME"
+    [ -n "$GIT_EMAIL" ]  && printf 'GIT_USER_EMAIL=%s\n' "$GIT_EMAIL"
     [ -n "$CONF_IMAGE" ] && printf 'IMAGE=%s\n' "$CONF_IMAGE"
     [ -n "$CONF_PORT" ]  && printf 'PUBLISHED_PORT=%s\n' "$CONF_PORT"
     printf 'AGENT_CONTROL=%s\n' "${CONF_AGENT_CONTROL:-1}"
@@ -655,6 +690,11 @@ cmd_deploy() {
     shift
   done
   load_all
+  case "$CONF_TARGET" in
+    local) ;;
+    ssh) [ -n "$CONF_SSH_HOST" ] || die "TARGET=ssh needs SSH_HOST in $CONF_NAME_FILE" ;;
+    *) die "TARGET in $CONF_NAME_FILE must be 'local' or 'ssh', not '$CONF_TARGET'" ;;
+  esac
   render "$PROJECT_ID"
   [ "$no_verify" -eq 1 ] || verify "$PROJECT_ID"
 
