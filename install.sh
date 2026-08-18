@@ -29,6 +29,9 @@ bash -n "$tmp" || { echo "install: the downloaded script does not parse" >&2; ex
 
 # Read the version already on the machine, so the install can report a change
 # rather than leaving you to guess whether it did anything.
+# raw.githubusercontent.com sets max-age=300, so for five minutes after a push
+# this still fetches the previous file. A reinstall that reports no version
+# change right after a release is the cache, not a failure.
 prev=""
 if command -v kitbox >/dev/null 2>&1; then
   prev=$(kitbox version 2>/dev/null | awk '{print $2}')
