@@ -104,6 +104,24 @@ fi
 mkdir -p "$WORKSPACE"
 chown vscode:vscode "$WORKSPACE" 2>/dev/null || true
 
+# Identity and credentials before the clone below. `gh auth setup-git` installs
+# the credential helper that a private https clone needs; running it afterwards
+# meant no token could ever reach git, and every private repo failed with
+# "could not read Username".
+if [ -n "${GIT_USER_NAME:-}" ]; then
+  as_user "git config --global user.name '$GIT_USER_NAME'"
+fi
+if [ -n "${GIT_USER_EMAIL:-}" ]; then
+  as_user "git config --global user.email '$GIT_USER_EMAIL'"
+fi
+# Agents commit inside a container whose uid differs from the host's, which git
+# reads as someone else's repository and refuses to touch.
+as_user "git config --global --add safe.directory '$WORKSPACE'" 2>/dev/null || true
+if [ -n "${GH_TOKEN:-}" ]; then
+  as_user "gh auth setup-git" >/dev/null 2>&1 \
+    || say "warning: could not configure git to use GH_TOKEN"
+fi
+
 if [ -n "${WORKSPACE_REPO:-}" ] && [ -z "$(ls -A "$WORKSPACE" 2>/dev/null)" ]; then
   say "cloning $WORKSPACE_REPO into $WORKSPACE"
   # Loud, but not fatal. Dying here used to leave a container that restarted,
@@ -118,21 +136,13 @@ if [ -n "${WORKSPACE_REPO:-}" ] && [ -z "$(ls -A "$WORKSPACE" 2>/dev/null)" ]; t
     say "       - an ssh host alias from your laptop's ~/.ssh/config, which does"
     say "         not exist in here — use the https:// URL instead"
     say "       - a git@ URL with no key mounted at /home/vscode/.ssh"
-    say "       - a private repo over https:// with no GH_TOKEN set"
+    if [ -z "${GH_TOKEN:-}" ]; then
+      say "       - a private repo over https:// with no GH_TOKEN set"
+    else
+      say "       - GH_TOKEN is set but GitHub rejected it, or it lacks access"
+      say "         to this repository"
+    fi
   fi
-fi
-
-if [ -n "${GIT_USER_NAME:-}" ]; then
-  as_user "git config --global user.name '$GIT_USER_NAME'"
-fi
-if [ -n "${GIT_USER_EMAIL:-}" ]; then
-  as_user "git config --global user.email '$GIT_USER_EMAIL'"
-fi
-# Agents commit inside a container whose uid differs from the host's, which git
-# reads as someone else's repository and refuses to touch.
-as_user "git config --global --add safe.directory '$WORKSPACE'" 2>/dev/null || true
-if [ -n "${GH_TOKEN:-}" ]; then
-  as_user "gh auth setup-git" >/dev/null 2>&1 || true
 fi
 
 # --- agent control -------------------------------------------------------------
