@@ -246,7 +246,7 @@ The image downloads a kitterm release tarball. To test a build that has not
 shipped, drop it into `dist/` and it wins over the download:
 
 ```sh
-cd ../kitterm && ./scripts/build-release-linux.sh v0.15.2
-cp dist/kitterm-v0.15.2-linux-arm64.tar.gz ../kitbox/dist/
+cd ../kitterm && ./scripts/build-release-linux.sh v0.17.0
+cp dist/kitterm-v0.17.0-linux-arm64.tar.gz ../kitbox/dist/
 cd ../kitbox && docker compose build
 ```

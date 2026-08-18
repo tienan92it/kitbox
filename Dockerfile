@@ -48,7 +48,7 @@ RUN curl -fsSL https://tailscale.com/install.sh | sh \
 #
 # A tarball dropped into ./dist wins over the download — that is how you test a
 # kitterm build that has not been released yet.
-ARG KITTERM_VERSION=v0.15.2
+ARG KITTERM_VERSION=v0.17.0
 ARG KITTERM_REPO=tienan92it/kitterm
 ARG TARGETARCH
 COPY dist/ /tmp/localdist/
