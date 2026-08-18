@@ -77,8 +77,13 @@ if [ ! -S "$SOCK" ]; then
   note "not running — this box is in local mode (published port only)"
 else
   STATE=$(ts status --json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
-      try{const j=JSON.parse(s);process.stdout.write((j.BackendState||"")+" "+(j.Self?.DNSName||"").replace(/\.$/,""))}catch(e){}})' 2>/dev/null)
-  BACKEND=${STATE%% *}; FQDN=${STATE#* }
+      try{const j=JSON.parse(s);process.stdout.write([
+        (j.BackendState||"-"),
+        (j.Self?.DNSName||"-").replace(/\.$/,""),
+        ((j.Self?.TailscaleIPs||[])[0]||"-")].join(" "))}catch(e){}})' 2>/dev/null)
+  BACKEND=$(printf '%s' "$STATE" | cut -d' ' -f1)
+  FQDN=$(printf '%s' "$STATE" | cut -d' ' -f2)
+  TSIP=$(printf '%s' "$STATE" | cut -d' ' -f3)
   if [ "$BACKEND" = "Running" ]; then
     ok "joined as ${FQDN:-<no name>}"
   else
@@ -97,18 +102,43 @@ else
   # The one failure with no visible symptom: serve is configured, the port
   # answers, and the TLS handshake dies because no certificate can be issued.
   if echo "$SERVE" | grep -q '^https://'; then
-    CERT=$(grep -iE "acme|cert\(" /var/log/tailscaled.log 2>/dev/null | tail -3)
-    if echo "$CERT" | grep -q "rateLimited"; then
-      bad "Let's Encrypt has rate-limited this name"
-      note "$(echo "$CERT" | grep rateLimited | tail -1 | cut -c1-160)"
-      note "enable HTTPS Certificates, or set TS_SERVE_HTTP=1 and restart"
-    elif echo "$CERT" | grep -qi "error\|failed"; then
-      bad "certificate trouble"
-      note "$(echo "$CERT" | tail -1 | cut -c1-160)"
-      note "enable HTTPS Certificates: https://login.tailscale.com/admin/dns"
-    else
-      ok "no certificate errors logged"
+    # Ask the question directly rather than read the log for scary words. Two
+    # normal lines look like failures: "Funnel is not enabled" is how tailscaled
+    # announces it chose the dns-01 challenge, and "tls-cert-pending: error" is
+    # the pending state during issuance, cleared by a later "ok".
+    #
+    # --resolve, because this box declines MagicDNS, so the tailnet name does
+    # not resolve from in here. SNI still carries the name, so the handshake is
+    # the same one a phone performs.
+    CODE=000
+    if [ -n "$TSIP" ] && [ "$TSIP" != "-" ]; then
+      # No `|| echo 000` here. curl already prints 000 on a failed handshake and
+      # then exits non-zero, so the fallback appended a second 000 and the test
+      # below saw "000000", which is not "000", and passed a total failure.
+      CODE=$(curl -sS -m 25 -o /dev/null -w '%{http_code}' \
+             --resolve "$FQDN:443:$TSIP" "https://$FQDN/" 2>/dev/null)
+      [ -n "$CODE" ] || CODE=000
     fi
+    case "$CODE" in
+      2??|3??|4??|5??)
+      # 403 is a pass here: TLS completed and kitterm asked for a token.
+        ok "TLS completes on https://$FQDN (HTTP $CODE)" ;;
+      *)
+        bad "TLS did not complete for $FQDN"
+      if grep -q rateLimited /var/log/tailscaled.log 2>/dev/null; then
+        note "Let's Encrypt rate-limited this name: 5 failed authorizations per hour"
+        note "$(grep rateLimited /var/log/tailscaled.log | tail -1 | cut -c1-150)"
+        note "wait an hour, or change TS_HOSTNAME for a fresh budget"
+      elif grep -qE 'status: invalid|OrderError' /var/log/tailscaled.log 2>/dev/null; then
+        note "the dns-01 challenge failed; check https://status.tailscale.com"
+        note "$(grep -E 'status: invalid|OrderError' /var/log/tailscaled.log | tail -1 | cut -c1-150)"
+      else
+        note "the certificate is fetched on the first handshake, so give it a few"
+        note "seconds after start, then run doctor again"
+        note "if it persists, enable HTTPS Certificates:"
+        note "https://login.tailscale.com/admin/dns"
+      fi ;;
+    esac
   fi
 fi
 
