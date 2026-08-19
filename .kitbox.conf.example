@@ -20,7 +20,7 @@ AGENTS=claude
 
 TZ=UTC
 
-# Cloned into the workspace on first start. Blank means an empty workspace.
+# Cloned into <workspace>/<repo-name> on first start. Blank leaves it empty.
 WORKSPACE_REPO=https://github.com/you/my-project
 
 # The agent commits with this identity. kitbox init asks when git has none.

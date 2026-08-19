@@ -117,19 +117,40 @@ fi
 # Agents commit inside a container whose uid differs from the host's, which git
 # reads as someone else's repository and refuses to touch.
 as_user "git config --global --add safe.directory '$WORKSPACE'" 2>/dev/null || true
+as_user "git config --global --add safe.directory '$WORKSPACE/*'" 2>/dev/null || true
 if [ -n "${GH_TOKEN:-}" ]; then
   as_user "gh auth setup-git" >/dev/null 2>&1 \
     || say "warning: could not configure git to use GH_TOKEN"
 fi
 
-if [ -n "${WORKSPACE_REPO:-}" ] && [ -z "$(ls -A "$WORKSPACE" 2>/dev/null)" ]; then
-  say "cloning $WORKSPACE_REPO into $WORKSPACE"
+# The workspace holds projects, not one project's files. A repository lands in
+# $WORKSPACE/<name>, so a second clone has somewhere to go and the name stays
+# visible in the prompt and in every path the agent prints.
+repo_dir_name() {
+  local u="${1%/}"
+  u="${u%.git}"
+  printf '%s' "${u##*/}"
+}
+
+PROJECT_DIR="$WORKSPACE"
+if [ -n "${WORKSPACE_REPO:-}" ]; then
+  if [ -d "$WORKSPACE/.git" ]; then
+    # A box built before the nested layout. Moving a checkout out from under a
+    # running agent is not worth the tidiness, so leave it where it is.
+    say "the workspace holds a checkout at its root; keeping the older layout"
+  else
+    PROJECT_DIR="$WORKSPACE/$(repo_dir_name "$WORKSPACE_REPO")"
+  fi
+fi
+
+if [ -n "${WORKSPACE_REPO:-}" ] && [ ! -d "$PROJECT_DIR/.git" ]; then
+  say "cloning $WORKSPACE_REPO into $PROJECT_DIR"
   # Loud, but not fatal. Dying here used to leave a container that restarted,
   # failed the same way, and restarted again — and the one tool you would use to
   # diagnose it is the terminal this box exists to serve. So the box comes up
   # with an empty workspace and says exactly what went wrong; `doctor` repeats
   # it, and you can fix the clone from inside.
-  if ! as_user "git clone '$WORKSPACE_REPO' '$WORKSPACE'"; then
+  if ! as_user "git clone '$WORKSPACE_REPO' '$PROJECT_DIR'"; then
     say "ERROR: could not clone $WORKSPACE_REPO"
     say "       The box is starting anyway, with an empty workspace, so you can"
     say "       fix this from a terminal. Common causes:"
@@ -147,7 +168,11 @@ fi
 
 # Every pane starts here. .bashrc reads this, because STATE_DIR moves the
 # workspace and the image has a literal baked in otherwise.
-export KITBOX_WORKSPACE="$WORKSPACE"
+if [ -d "$PROJECT_DIR" ]; then
+  export KITBOX_WORKSPACE="$PROJECT_DIR"
+else
+  export KITBOX_WORKSPACE="$WORKSPACE"
+fi
 
 # --- agent control -------------------------------------------------------------
 # --agent-control opens POST /api/sessions/<id>/input, so anything holding a

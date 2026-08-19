@@ -41,10 +41,13 @@ fi
 WORKSPACE="${WORKSPACE_DIR:-${STATE_DIR:+$STATE_DIR/workspace}}"
 WORKSPACE="${WORKSPACE:-/workspace}"
 if [ -n "${WORKSPACE_REPO:-}" ]; then
-  if [ -d "$WORKSPACE/.git" ]; then
+  # The clone lands in $WORKSPACE/<name>. A checkout at the root is a box from
+  # before that change, and is still valid.
+  NAME=${WORKSPACE_REPO%/}; NAME=${NAME%.git}; NAME=${NAME##*/}
+  if [ -d "$WORKSPACE/$NAME/.git" ] || [ -d "$WORKSPACE/.git" ]; then
     ok "workspace holds a clone of $WORKSPACE_REPO"
   else
-    bad "WORKSPACE_REPO is set but $WORKSPACE has no checkout"
+    bad "WORKSPACE_REPO is set but $WORKSPACE/$NAME has no checkout"
     note "the clone failed at startup; see: docker logs <box> | grep -i clone"
     note "an ssh host alias from your laptop does not resolve in here — use the"
     note "https:// URL, with GH_TOKEN if the repo is private"
