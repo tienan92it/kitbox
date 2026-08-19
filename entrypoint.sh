@@ -145,6 +145,10 @@ if [ -n "${WORKSPACE_REPO:-}" ] && [ -z "$(ls -A "$WORKSPACE" 2>/dev/null)" ]; t
   fi
 fi
 
+# Every pane starts here. .bashrc reads this, because STATE_DIR moves the
+# workspace and the image has a literal baked in otherwise.
+export KITBOX_WORKSPACE="$WORKSPACE"
+
 # --- agent control -------------------------------------------------------------
 # --agent-control opens POST /api/sessions/<id>/input, so anything holding a
 # full-grade token can type into a shell rather than only watch one. On unless
@@ -289,6 +293,12 @@ echo
 echo "================================================================"
 echo "  Open this on your phone and your laptop:"
 echo "    $URL_BASE/?token=$TOKEN"
+echo
+# The client keeps its pane layout in sessionStorage, which is per tab. Reload a
+# tab and it reattaches to the same shell; open the app fresh and it starts a
+# new one, so the scrollback looks lost. This page lists what is still running.
+echo "  Reconnecting later? This lists the shells still running:"
+echo "    $URL_BASE/sessions?token=$TOKEN"
 echo
 INSTALLED=""
 for a in claude codex grok opencode; do

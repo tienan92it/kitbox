@@ -116,9 +116,13 @@ RUN chmod 755 /usr/local/bin/kitbox-entrypoint /usr/local/bin/doctor
 
 # Shell integration is what makes commands, exit codes and durations visible
 # over the API. Without it the supervision layer is dark: /api/.../commands
-# stays empty forever. `cd /workspace` puts panes in the project, not $HOME.
+# stays empty forever. The `cd` puts panes in the project, not $HOME.
+#
+# KITBOX_WORKSPACE, not a literal path: STATE_DIR moves the workspace onto the
+# volume, and the image cannot know that at build time. The entrypoint exports
+# the resolved path, and the daemon passes it down to every pane.
 RUN su vscode -c 'kitterm integrate bash >> /home/vscode/.bashrc' \
- && printf '\n# Open panes in the workspace, not $HOME.\ncd /workspace 2>/dev/null || true\n' \
+ && printf '\n# Open panes in the workspace, not $HOME.\ncd "${KITBOX_WORKSPACE:-/workspace}" 2>/dev/null || true\n' \
       >> /home/vscode/.bashrc \
  && mkdir -p /workspace && chown vscode:vscode /workspace
 

@@ -11,7 +11,7 @@
 # Written for bash 3.2, because that is what macOS ships.
 set -euo pipefail
 
-VERSION=0.2.0
+VERSION=0.3.0
 IMAGE_DEFAULT=ghcr.io/tienan92it/kitbox:latest
 KITBOX_HOME=${KITBOX_HOME:-$HOME/.kitbox}
 CONF_NAME_FILE=.kitbox.conf
@@ -253,6 +253,23 @@ dock() {
   fi
 }
 
+# `--pull always` on a reference with no registry host asks Docker Hub for an
+# image that only exists on this machine, and the deploy dies. IMAGE= in
+# .kitbox.conf is documented for exactly that case: an image you built to get
+# an agent the published one does not carry.
+pull_mode() {
+  # Two statements, not one `local a= b=$a`: bash expands every word before the
+  # builtin runs, so the second would read an unset variable from the outer
+  # scope and die under `set -u`.
+  local img host
+  img="${CONF_IMAGE:-$IMAGE_DEFAULT}"
+  host="${img%%/*}"
+  case "$img" in
+    */*) case "$host" in *.*|*:*|localhost) printf always ;; *) printf always ;; esac ;;
+    *)   printf missing ;;
+  esac
+}
+
 compose_up() {                       # $1 = project id
   local id="$1"
   if [ "$CONF_TARGET" = ssh ]; then
@@ -261,9 +278,9 @@ compose_up() {                       # $1 = project id
     scp -q "$(proj_dir "$id")/docker-compose.yml" "$(proj_dir "$id")/.env" \
         "$CONF_SSH_HOST:$rdir/"
     ssh -o BatchMode=yes "$CONF_SSH_HOST" \
-        "cd '$rdir' && (docker compose up -d --pull always || docker-compose up -d --pull always)"
+        "cd '$rdir' && (docker compose up -d --pull $(pull_mode) || docker-compose up -d --pull $(pull_mode))"
   else
-    ( cd "$(proj_dir "$id")" && $(compose_bin) up -d --pull always )
+    ( cd "$(proj_dir "$id")" && $(compose_bin) up -d --pull "$(pull_mode)" )
   fi
 }
 
@@ -728,8 +745,14 @@ box_url() {
   # The entrypoint already prints the exact URL, scheme and tailnet name
   # included. Reading it back beats reassembling it from parts we would have to
   # guess at from out here.
-  dock logs "$CONF_HOSTNAME" 2>&1 \
-    | grep -o 'https\{0,1\}://[^ ]*token=[A-Za-z0-9_]*' | tail -1 || true
+  local all
+  all=$(dock logs "$CONF_HOSTNAME" 2>&1 \
+        | grep -o 'https\{0,1\}://[^ ]*token=[A-Za-z0-9_]*' || true)
+  if [ "${1:-terminal}" = sessions ]; then
+    printf '%s\n' "$all" | grep '/sessions?' | tail -1 || true
+  else
+    printf '%s\n' "$all" | grep -v '/sessions?' | tail -1 || true
+  fi
 }
 
 cmd_url() {
@@ -739,7 +762,13 @@ cmd_url() {
     die "no URL in the box's logs yet. Try: kitbox logs"
   fi
   printf '\n  %sOpen this on your phone and your laptop%s\n' "$C_B" "$C_OFF"
-  printf '  %s%s%s\n\n' "$C_CYN" "$url" "$C_OFF"
+  printf '  %s%s%s\n' "$C_CYN" "$url" "$C_OFF"
+  local sessions; sessions=$(box_url sessions)
+  if [ -n "$sessions" ]; then
+    printf '\n  %sReconnecting? This lists the shells still running%s\n' "$C_B" "$C_OFF"
+    printf '  %s%s%s\n' "$C_CYN" "$sessions" "$C_OFF"
+  fi
+  printf '\n'
 }
 
 cmd_logs()   { load_all; dock logs "$@" "$CONF_HOSTNAME"; }
